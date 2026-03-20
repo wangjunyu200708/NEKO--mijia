@@ -9,14 +9,14 @@ entry = "plugins.mijia:MijiaPlugin"
 recommended = ">=0.1.0,<0.2.0"
 supported = ">=0.1.0,<0.3.0"
 
+[plugin_runtime]
+auto_start = true          
+max_retries = 3          # 最大重试次数
+restart_on_crash = true  # 崩溃后自动重启
+
 [plugin.author]
 name = "N.E.K.O Team"
 email = ""
 
 [plugin.dependencies]
-# 插件依赖的Python包
-packages = [
-    "pillow",        # 已存在
-    "qrcode",        # 已存在
-    "requests",      # 已存在
-]
+packages = ["pillow", "qrcode", "requests"]
