@@ -29,11 +29,90 @@ class MijiaPlugin(NekoPluginBase):
         self.device_cache = {}
         self.last_discovery_time = None
         
+        # 设备标识持久化文件
+        self.devices_file = ctx.config_path.parent / "devices.json"
+        self._load_device_cache()
+        
         # 从上下文获取配置路径
         self.config_path = ctx.config_path.parent / "mijia.json"
         self._load_config()
         
         self.logger.info("米家插件初始化完成")
+    
+    def _load_device_cache(self):
+        """从文件加载设备缓存"""
+        try:
+            if self.devices_file.exists():
+                with open(self.devices_file, 'r', encoding='utf-8') as f:
+                    self.device_cache = json.load(f)
+                self.logger.info(f"已加载 {len(self.device_cache)} 个设备缓存")
+        except Exception as e:
+            self.logger.error(f"加载设备缓存失败: {e}")
+            self.device_cache = {}
+    
+    def _save_device_cache(self):
+        """保存设备缓存到文件"""
+        try:
+            with open(self.devices_file, 'w', encoding='utf-8') as f:
+                json.dump(self.device_cache, f, ensure_ascii=False, indent=2)
+            self.logger.info(f"已保存 {len(self.device_cache)} 个设备缓存")
+        except Exception as e:
+            self.logger.error(f"保存设备缓存失败: {e}")
+    
+    def _update_device_properties_cache(self, device_id: str, properties: List):
+        """更新设备属性缓存（包含 siid/piid）"""
+        if device_id not in self.device_cache:
+            return
+        
+        device_info = self.device_cache[device_id]
+        properties_info = {}
+        
+        for prop in properties:
+            prop_info = {
+                "name": prop.name,
+                "description": prop.desc,
+                "type": prop.type,
+                "rw": prop.rw,
+                "unit": prop.unit,
+                "siid": getattr(prop, 'siid', None),
+                "piid": getattr(prop, 'piid', None),
+                "range": getattr(prop, 'range', None),
+                "value_list": getattr(prop, 'value_list', None)
+            }
+            properties_info[prop.name] = prop_info
+        
+        device_info["properties"] = properties_info
+        device_info["last_update"] = datetime.now().isoformat()
+        self.device_cache[device_id] = device_info
+        
+        # 保存到文件
+        self._save_device_cache()
+        self.logger.info(f"已更新设备 {device_id} 的属性缓存（含 siid/piid）")
+    
+    def _update_device_actions_cache(self, device_id: str, actions: List):
+        """更新设备动作缓存（包含 siid/aiid）"""
+        if device_id not in self.device_cache:
+            return
+        
+        device_info = self.device_cache[device_id]
+        actions_info = {}
+        
+        for action in actions:
+            action_info = {
+                "name": action.name,
+                "description": action.desc,
+                "siid": getattr(action, 'siid', None),
+                "aiid": getattr(action, 'aiid', None)
+            }
+            actions_info[action.name] = action_info
+        
+        device_info["actions"] = actions_info
+        device_info["last_update"] = datetime.now().isoformat()
+        self.device_cache[device_id] = device_info
+        
+        # 保存到文件
+        self._save_device_cache()
+        self.logger.info(f"已更新设备 {device_id} 的动作缓存（含 siid/aiid）")
     
     def _load_config(self):
         """加载配置"""
@@ -237,12 +316,29 @@ class MijiaPlugin(NekoPluginBase):
                     "type": "boolean",
                     "description": "是否只返回在线设备",
                     "default": False
+                },
+                "force_refresh": {
+                    "type": "boolean",
+                    "description": "是否强制刷新（忽略缓存）",
+                    "default": False
                 }
             }
         }
     )
-    async def discover_devices(self, online_only: bool = False, **_):
-        """发现设备"""
+    async def discover_devices(self, online_only: bool = False, force_refresh: bool = False, **_):
+        """发现设备并保存标识"""
+        # 如果有缓存且不强制刷新，直接返回缓存
+        if not force_refresh and self.device_cache:
+            self.logger.info(f"使用缓存设备列表 ({len(self.device_cache)} 个设备)")
+            device_list = list(self.device_cache.values())
+            return {
+                "success": True,
+                "devices": device_list,
+                "count": len(device_list),
+                "cached": True,
+                "last_discovery": self.last_discovery_time.isoformat() if self.last_discovery_time else None
+            }
+        
         if not self._check_connected():
             return self._not_connected_response()
         
@@ -256,7 +352,7 @@ class MijiaPlugin(NekoPluginBase):
             
             devices = await self.adapter.discover_devices(online_only=online_only)
             
-            # 更新缓存
+            # 更新缓存并保存
             device_list = []
             for device in devices:
                 device_info = {
@@ -264,14 +360,24 @@ class MijiaPlugin(NekoPluginBase):
                     "name": device.name,
                     "model": device.model,
                     "online": getattr(device, 'online', True),
-                    "room_id": getattr(device, 'room_id', None)
+                    "room_id": getattr(device, 'room_id', None),
+                    "spec_type": getattr(device, 'spec_type', None),
+                    "properties": {},
+                    "actions": {},
+                    "last_update": datetime.now().isoformat()
                 }
                 self.device_cache[device.did] = device_info
                 device_list.append(device_info)
+                
+                # 异步获取设备属性（含 siid/piid）
+                asyncio.create_task(self._fetch_device_details(device.did))
             
             self.last_discovery_time = datetime.now()
             
-            self.logger.info(f"发现 {len(device_list)} 个设备")
+            # 保存到文件
+            self._save_device_cache()
+            
+            self.logger.info(f"发现 {len(device_list)} 个设备，正在后台获取详细信息...")
             
             # 推送消息
             self.ctx.push_message(
@@ -279,7 +385,7 @@ class MijiaPlugin(NekoPluginBase):
                 message_type="text",
                 description="设备发现完成",
                 priority=4,
-                content=f"发现 {len(device_list)} 个米家设备",
+                content=f"发现 {len(device_list)} 个米家设备，正在获取详细信息",
                 metadata={"count": len(device_list)}
             )
             
@@ -292,7 +398,10 @@ class MijiaPlugin(NekoPluginBase):
             return {
                 "success": True,
                 "devices": device_list,
-                "count": len(device_list)
+                "count": len(device_list),
+                "cached": False,
+                "last_discovery": self.last_discovery_time.isoformat(),
+                "message": "设备已发现，详细信息正在后台获取中"
             }
             
         except Exception as e:
@@ -302,6 +411,43 @@ class MijiaPlugin(NekoPluginBase):
                 "error": str(e)
             }
     
+    async def _fetch_device_details(self, device_id: str):
+        """后台获取设备详细信息（属性、动作的 siid/piid）"""
+        try:
+            if not self._check_connected():
+                return
+            
+            self.logger.info(f"正在获取设备 {device_id} 的详细信息...")
+            
+            # 获取设备属性
+            try:
+                properties = await self.adapter.get_device_properties(device_id)
+                self._update_device_properties_cache(device_id, properties)
+                self.logger.info(f"已获取设备 {device_id} 的 {len(properties)} 个属性")
+            except Exception as e:
+                self.logger.warning(f"获取设备 {device_id} 属性失败: {e}")
+            
+            # 获取设备动作
+            try:
+                actions = await self.adapter.get_device_actions(device_id)
+                self._update_device_actions_cache(device_id, actions)
+                self.logger.info(f"已获取设备 {device_id} 的 {len(actions)} 个动作")
+            except Exception as e:
+                self.logger.warning(f"获取设备 {device_id} 动作失败: {e}")
+            
+            # 推送完成消息
+            self.ctx.push_message(
+                source="mijia",
+                message_type="text",
+                description="设备信息获取完成",
+                priority=3,
+                content=f"设备 {device_id} 的详细信息已获取",
+                metadata={"device_id": device_id}
+            )
+            
+        except Exception as e:
+            self.logger.error(f"获取设备 {device_id} 详细信息失败: {e}")
+    
     @plugin_entry(
         id="get_devices",
         name="获取设备列表",
@@ -310,7 +456,7 @@ class MijiaPlugin(NekoPluginBase):
     async def get_devices(self, **_):
         """获取设备列表"""
         if not self.device_cache:
-            return await self.discover_devices()
+            return await self.discover_devices(force_refresh=False)
         
         return {
             "success": True,
@@ -319,6 +465,171 @@ class MijiaPlugin(NekoPluginBase):
             "cached": True,
             "last_discovery": self.last_discovery_time.isoformat() if self.last_discovery_time else None
         }
+    
+    @plugin_entry(
+        id="get_device_by_name",
+        name="按名称查找设备",
+        description="根据名称查找设备标识",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "设备名称（支持模糊匹配）"
+                }
+            },
+            "required": ["name"]
+        }
+    )
+    async def get_device_by_name(self, name: str, **_):
+        """按名称查找设备"""
+        name_lower = name.lower()
+        results = []
+        
+        for did, device in self.device_cache.items():
+            if name_lower in device.get("name", "").lower():
+                results.append({
+                    "did": did,
+                    "name": device.get("name"),
+                    "model": device.get("model"),
+                    "online": device.get("online", True),
+                    "properties": device.get("properties", {}),
+                    "actions": device.get("actions", {})
+                })
+        
+        return {
+            "success": True,
+            "devices": results,
+            "count": len(results),
+            "total": len(self.device_cache)
+        }
+    
+    @plugin_entry(
+        id="get_device_by_did",
+        name="按ID查找设备",
+        description="根据设备ID查找设备标识",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "did": {
+                    "type": "string",
+                    "description": "设备ID"
+                }
+            },
+            "required": ["did"]
+        }
+    )
+    async def get_device_by_did(self, did: str, **_):
+        """按设备ID查找设备"""
+        device = self.device_cache.get(did)
+        if not device:
+            return {
+                "success": False,
+                "error": f"未找到设备: {did}"
+            }
+        
+        return {
+            "success": True,
+            "device": device
+        }
+    
+    @plugin_entry(
+        id="control_by_name",
+        name="按名称控制设备",
+        description="使用设备名称控制设备（需要先发现设备）",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "device_name": {
+                    "type": "string",
+                    "description": "设备名称"
+                },
+                "property_name": {
+                    "type": "string",
+                    "description": "属性名称（如 on, power）"
+                },
+                "value": {
+                    "description": "要设置的值"
+                }
+            },
+            "required": ["device_name", "property_name", "value"]
+        }
+    )
+    async def control_by_name(self, device_name: str, property_name: str, value: Any, **_):
+        """使用设备名称控制设备"""
+        # 查找设备
+        device_info = None
+        device_id = None
+        for did, info in self.device_cache.items():
+            if device_name.lower() in info.get("name", "").lower():
+                device_info = info
+                device_id = did
+                break
+        
+        if not device_info:
+            return {
+                "success": False,
+                "error": f"未找到设备: {device_name}",
+                "available_devices": [d.get("name") for d in self.device_cache.values()]
+            }
+        
+        # 查找属性
+        properties = device_info.get("properties", {})
+        if property_name not in properties:
+            return {
+                "success": False,
+                "error": f"设备 {device_name} 没有属性: {property_name}",
+                "available_properties": list(properties.keys())
+            }
+        
+        prop_info = properties[property_name]
+        siid = prop_info.get("siid")
+        piid = prop_info.get("piid")
+        
+        if not siid or not piid:
+            # 尝试重新获取属性
+            self.logger.warning(f"属性 {property_name} 缺少 siid/piid，尝试重新获取...")
+            try:
+                if self._check_connected():
+                    new_props = await self.adapter.get_device_properties(device_id)
+                    self._update_device_properties_cache(device_id, new_props)
+                    # 重新获取
+                    updated_device = self.device_cache.get(device_id, {})
+                    updated_prop = updated_device.get("properties", {}).get(property_name, {})
+                    siid = updated_prop.get("siid")
+                    piid = updated_prop.get("piid")
+                    if siid and piid:
+                        self.logger.info(f"成功获取属性 {property_name} 的 siid={siid}, piid={piid}")
+            except Exception as e:
+                self.logger.error(f"重新获取属性失败: {e}")
+        
+        if not siid or not piid:
+            return {
+                "success": False,
+                "error": f"属性 {property_name} 缺少标识信息 (siid/piid)，请先调用 get_device_properties 获取"
+            }
+        
+        # 调用设置
+        return await self.set_property_value(device_id, siid, piid, value)
+    
+    @plugin_entry(
+        id="refresh_device_cache",
+        name="刷新设备缓存",
+        description="重新发现设备并更新缓存",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "online_only": {
+                    "type": "boolean",
+                    "description": "是否只返回在线设备",
+                    "default": False
+                }
+            }
+        }
+    )
+    async def refresh_device_cache(self, online_only: bool = False, **_):
+        """刷新设备缓存"""
+        return await self.discover_devices(online_only=online_only, force_refresh=True)
     
     @plugin_entry(
         id="get_device_properties",
@@ -343,6 +654,9 @@ class MijiaPlugin(NekoPluginBase):
         try:
             properties = await self.adapter.get_device_properties(device_id)
             
+            # 更新缓存
+            self._update_device_properties_cache(device_id, properties)
+            
             prop_list = []
             for prop in properties:
                 prop_list.append({
@@ -366,6 +680,55 @@ class MijiaPlugin(NekoPluginBase):
             
         except Exception as e:
             self.logger.exception(f"获取设备属性失败: {e}")
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    @plugin_entry(
+        id="get_device_actions",
+        name="获取设备动作",
+        description="获取设备支持的动作列表",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "设备ID"
+                }
+            },
+            "required": ["device_id"]
+        }
+    )
+    async def get_device_actions(self, device_id: str, **_):
+        """获取设备动作"""
+        if not self._check_connected():
+            return self._not_connected_response()
+        
+        try:
+            actions = await self.adapter.get_device_actions(device_id)
+            
+            # 更新缓存
+            self._update_device_actions_cache(device_id, actions)
+            
+            action_list = []
+            for action in actions:
+                action_list.append({
+                    "name": action.name,
+                    "description": action.desc,
+                    "siid": getattr(action, 'siid', None),
+                    "aiid": getattr(action, 'aiid', None)
+                })
+            
+            return {
+                "success": True,
+                "device_id": device_id,
+                "actions": action_list,
+                "count": len(action_list)
+            }
+            
+        except Exception as e:
+            self.logger.exception(f"获取设备动作失败: {e}")
             return {
                 "success": False,
                 "error": str(e)
@@ -533,7 +896,7 @@ class MijiaPlugin(NekoPluginBase):
     async def search_devices(self, query: str = "", online_only: bool = False, **_):
         """搜索设备"""
         if not self.device_cache:
-            await self.discover_devices()
+            await self.discover_devices(force_refresh=False)
         
         results = []
         query_lower = query.lower() if query else ""
