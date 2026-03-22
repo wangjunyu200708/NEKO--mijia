@@ -209,20 +209,20 @@ if isinstance(result, Ok):
 
 ## 📁 文件结构
 
-mijia/
-├── __init__.py              # 插件主入口
-├── adapter/
-│   └── mijia_adapter.py     # 米家适配器
-├── config/
-│   └── mijia_config.py      # 配置管理
-├── utils/
-│   ├── auth_manager.py      # 认证数据管理
-│   └── logger.py            # 日志工具
-├── data/                    # 运行时数据目录
-│   ├── config.json          # 插件配置
-│   ├── devices.json         # 设备缓存
-│   └── auth_data.json       # 认证数据
-└── plugin.toml              # 插件描述文件
+>mijia/
+>├── __init__.py              # 插件主入口
+>├── adapter/
+>│   └── mijia_adapter.py     # 米家适配器
+>├── config/
+>│   └── mijia_config.py      # 配置管理
+>├── utils/
+>│   ├── auth_manager.py      # 认证数据管理
+>│   └── logger.py            # 日志工具
+>├── data/                    # 运行时数据目录
+>│   ├── config.json          # 插件配置
+>│   ├── devices.json         # 设备缓存
+>│   └── auth_data.json       # 认证数据
+>└── plugin.toml              # 插件描述文件
 
 ## 📄 许可证
 本插件遵循 N.E.K.O 框架的许可证协议。
