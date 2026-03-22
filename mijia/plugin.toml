@@ -9,23 +9,19 @@ entry = "plugin.plugins.mijia:MijiaPlugin"
 recommended = ">=0.1.0,<0.2.0"
 supported = ">=0.1.0,<0.3.0"
 
-[plugin_runtime]
-auto_start = true          
-max_retries = 3          # 最大重试次数
-restart_on_crash = true  # 崩溃后自动重启
-
 [plugin.author]
 name = "N.E.K.O Team"
 email = ""
 
 [plugin_runtime]
 enabled = true
-auto_start = false
+auto_start = true
+max_retries = 3
+restart_on_crash = true
 
 [plugin.dependencies]
 packages = [
     "pillow",
     "qrcode",
-    "requests",
-    "mijia-api",
+    "mijiaapi",
 ]

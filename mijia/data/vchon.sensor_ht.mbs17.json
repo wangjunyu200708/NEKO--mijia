@@ -1,0 +1,192 @@
+{
+  "name": "目博士温湿度计MBS-17",
+  "model": "vchon.sensor_ht.mbs17",
+  "properties": [
+    {
+      "name": "temperature",
+      "description": "Temperature / 温度",
+      "type": "float",
+      "rw": "r",
+      "unit": "celsius",
+      "range": [
+        -30,
+        100,
+        0.1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 2,
+        "piid": 1001
+      }
+    },
+    {
+      "name": "relative-humidity",
+      "description": "Relative Humidity / 相对湿度",
+      "type": "uint",
+      "rw": "r",
+      "unit": "percentage",
+      "range": [
+        0,
+        100,
+        1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 2,
+        "piid": 1002
+      }
+    },
+    {
+      "name": "battery-level",
+      "description": "Battery Level / 电池电量",
+      "type": "uint",
+      "rw": "r",
+      "unit": "percentage",
+      "range": [
+        0,
+        100,
+        1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 3,
+        "piid": 1003
+      }
+    },
+    {
+      "name": "current-time",
+      "description": "Current Time / 当前时间（unix timestamp）",
+      "type": "uint",
+      "rw": "",
+      "unit": "seconds",
+      "range": [
+        0,
+        4294967295,
+        1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 4,
+        "piid": 1
+      }
+    },
+    {
+      "name": "hour-system",
+      "description": "Hour System / 小时制(12/24)",
+      "type": "uint",
+      "rw": "",
+      "unit": null,
+      "range": null,
+      "value-list": [
+        {
+          "value": 0,
+          "description": "12"
+        },
+        {
+          "value": 1,
+          "description": "24"
+        }
+      ],
+      "method": {
+        "siid": 4,
+        "piid": 2
+      }
+    },
+    {
+      "name": "temperature-display-unit",
+      "description": "Temperature Display Unit / 温度显示单位",
+      "type": "uint",
+      "rw": "",
+      "unit": null,
+      "range": null,
+      "value-list": [
+        {
+          "value": 1,
+          "description": "Celsius"
+        },
+        {
+          "value": 2,
+          "description": "Fahrenheit"
+        }
+      ],
+      "method": {
+        "siid": 5,
+        "piid": 1026
+      }
+    },
+    {
+      "name": "alarm",
+      "description": "alarm / 闹钟设置",
+      "type": "string",
+      "rw": "",
+      "unit": null,
+      "range": null,
+      "value-list": null,
+      "method": {
+        "siid": 6,
+        "piid": 1
+      }
+    },
+    {
+      "name": "count-down",
+      "description": "Count down / 倒计时",
+      "type": "string",
+      "rw": "",
+      "unit": null,
+      "range": null,
+      "value-list": null,
+      "method": {
+        "siid": 7,
+        "piid": 1
+      }
+    },
+    {
+      "name": "history-data",
+      "description": "History / 历史记录",
+      "type": "string",
+      "rw": "",
+      "unit": null,
+      "range": null,
+      "value-list": null,
+      "method": {
+        "siid": 8,
+        "piid": 1
+      }
+    },
+    {
+      "name": "start-time",
+      "description": "Query time / 查询时间",
+      "type": "uint",
+      "rw": "",
+      "unit": null,
+      "range": [
+        0,
+        4294967295,
+        1
+      ],
+      "value-list": null,
+      "method": {
+        "siid": 8,
+        "piid": 3
+      }
+    }
+  ],
+  "actions": [
+    {
+      "name": "start-synic",
+      "description": "start-synic / 开始查询",
+      "method": {
+        "siid": 8,
+        "aiid": 1
+      }
+    },
+    {
+      "name": "stop-synic",
+      "description": "stop-synic / 结束查询",
+      "method": {
+        "siid": 8,
+        "aiid": 2
+      }
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 """Mijia device adapter based on MijiaAPI"""
 from typing import Dict, List, Any, Optional
+from pathlib import Path
 
 from mijiaAPI import mijiaAPI, mijiaDevice, get_device_info
 from mijiaAPI.apis import mijiaAPI as LoginAPI
@@ -11,27 +12,51 @@ import traceback
 from datetime import datetime
 import threading
 import time
-from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from PIL import Image
 from qrcode import QRCode
 
 _LOGGER = get_logger(__name__)
 
+
 class MijiaAdapter:
     """Mijia device adapter"""
 
-    def __init__(self):
-        """Initialize adapter"""
+    def __init__(self, config: Optional[MijiaConfig] = None, config_dir: Optional[Path] = None):
+        """Initialize adapter
+        
+        Args:
+            config: Mijia configuration, if None will load from default
+            config_dir: Config directory path for storing auth files
+        """
         self._api: Optional[mijiaAPI] = None
         self._auth_data: Optional[Dict[str, Any]] = None
         self._connected = False
         self._devices: Dict[str, mijiaDevice] = {}
-        self._config: Optional[MijiaConfig] = None
+        self._config: Optional[MijiaConfig] = config if config is not None else load_mijia_config()
+        self._device_status_cache: Dict[str, Dict[str, Any]] = {}
+        if config is None:
+            self._config = load_mijia_config()
+        elif isinstance(config, dict):
+            from ..config.mijia_config import MijiaConfig
+            self._config = MijiaConfig(
+                 username=config.get("username", ""),
+                 password=config.get("password", ""),
+                 enableQR=config.get("enableQR", True),
+                 log_level=config.get("log_level", "INFO")
+            )
+        else:
+            self._config = config
+
         self._device_status_cache: Dict[str, Dict[str, Any]] = {}
         self._last_status_update: Optional[datetime] = None
-        self._config = load_mijia_config()
-        self._auth_manager = AuthDataManager()
+        
+        # Initialize auth manager with optional config directory
+        if config_dir is not None:
+            self._auth_manager = AuthDataManager(config_dir=config_dir)
+        else:
+            self._auth_manager = AuthDataManager()
+            
         # Patch login API to avoid encoding issues with QR code display
         self._patch_qr_display()
 
