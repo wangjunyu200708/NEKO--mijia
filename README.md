@@ -21,7 +21,7 @@
 ### 1. 安装插件
 将插件放置在 N.E.K.O 的插件目录下：
 
-N.E.K.O/plugin/plugins/mijia/
+```N.E.K.O/plugin/plugins/mijia/```
 
 ### 2. 配置账号
 **方式一：通过 AI 对话配置**
@@ -29,28 +29,29 @@ N.E.K.O/plugin/plugins/mijia/
 请配置米家插件，账号是 ，密码是 
 
 **方式二：通过 HTTP API 配置**
-bash
-curl -X POST http://localhost:48916/plugin/trigger \
-  -H "Content-Type: application/json" \
-  -d '{
-    "plugin_id": "mijia",
-    "entry_id": "update_config",
-    "args": {
-      "username": "你的账号",
-      "password": "你的密码",
-      "enableQR": false,
-      "auto_connect": true
-    }
-  }'
+```bash
+ curl -X POST http://localhost:48916/plugin/trigger \
+   -H "Content-Type: application/json" \
+   -d '{
+     "plugin_id": "mijia",
+     "entry_id": "update_config",
+     "args": {
+       "username": "你的账号",
+       "password": "你的密码",
+       "enableQR": false,
+       "auto_connect": true
+     }
+   }'
+```
 ### 3. 连接米家
-请连接米家
+* 请连接米家
 ### 4. 发现设备
-请发现我的米家设备
+* 请发现我的米家设备
 ### 5. 控制设备
-请打开客厅的灯
-请设置空调温度为26度
-请关闭空气净化器
-请查询卧室灯的状态
+* 请打开客厅的灯
+* 请设置空调温度为26度
+* 请关闭空气净化器
+* 请查询卧室灯的状态
 ## 📚 插件入口点（Entry Points）
 
 ### 配置管理
@@ -86,11 +87,11 @@ curl -X POST http://localhost:48916/plugin/trigger \
 
 ### 配置文件位置
 
-N.E.K.O/plugin/plugins/mijia/data/config.json
+```N.E.K.O/plugin/plugins/mijia/data/config.json```
 
 ### 配置项说明
 
-json
+```json
 {
   "username": "米家账号（手机号/邮箱）",
   "password": "米家密码",
@@ -98,13 +99,13 @@ json
   "auto_connect": false, // true: 插件启动时自动连接
   "log_level": "INFO"    // 日志级别
 }
+```
 ## 📝 API 使用示例
 
 ### 1. 更新配置
 
-python
+```python
 通过跨插件调用
-
 result = await self.plugins.call_entry(
     "mijia:update_config",
     {
@@ -112,19 +113,19 @@ result = await self.plugins.call_entry(
         "password": "your_password"
     }
 )
-
+```
 ### 2. 连接米家
 
-python
+```python
 result = await self.plugins.call_entry("mijia:connect")
 if isinstance(result, Ok):
     print("连接成功")
 else:
     print(f"连接失败: {result.error}")
-
+```
 ### 3. 发现设备
 
-python
+```python
 result = await self.plugins.call_entry(
     "mijia:discover_devices",
     {
@@ -137,9 +138,10 @@ if isinstance(result, Ok):
     devices = result.value["devices"]
     for device in devices:
         print(f"设备: {device['name']} (ID: {device['did']})")
+```
 ### 4. 控制设备
 
-python
+```python
 设置设备属性（例如：打开开关）
 result = await self.plugins.call_entry(
     "mijia:set_property_value",
@@ -161,14 +163,16 @@ result = await self.plugins.call_entry(
         "params": []    # 动作参数
     }
 )
+```
 ### 5. 获取设备状态
-python
+```python
 获取设备状态
 result = await self.plugins.call_entry("mijia:get_status")
 if isinstance(result, Ok):
     status = result.value
     print(f"连接状态: {status['connected']}")
     print(f"设备数量: {status['device_count']}")
+```
 ## 🔄 工作流程
 1.  配置账号
 2.  连接米家
