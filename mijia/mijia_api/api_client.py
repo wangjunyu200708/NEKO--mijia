@@ -142,7 +142,7 @@ class MijiaAPI:
         device_id: str,
         siid: int,
         aiid: int,
-        params: Optional[Dict[str, Any]] = None,
+        params: Optional[List[Any]] = None,
         refresh_cache: bool = True,
     ) -> Any:
         """调用设备操作
@@ -153,7 +153,7 @@ class MijiaAPI:
             device_id: 设备ID
             siid: 服务ID
             aiid: 操作ID
-            params: 操作参数（可选）
+            params: 操作参数列表（可选）
             refresh_cache: 是否在操作后刷新缓存，默认为True
 
         Returns:
@@ -166,13 +166,13 @@ class MijiaAPI:
 
         Example:
             >>> # 调用操作并自动刷新缓存（推荐）
-            >>> api.call_device_action("device_123", 2, 1, {"mode": "auto"})
+            >>> api.call_device_action("device_123", 2, 1, ["auto"])
             >>>
             >>> # 调用操作但不刷新缓存
-            >>> api.call_device_action("device_123", 2, 1, {"mode": "auto"}, refresh_cache=False)
+            >>> api.call_device_action("device_123", 2, 1, ["auto"], refresh_cache=False)
         """
         result = self._device_service.call_device_action(
-            device_id, siid, aiid, params or {}, self._credential
+            device_id, siid, aiid, params or [], self._credential
         )
 
         # 操作成功后刷新缓存
@@ -294,12 +294,23 @@ class MijiaAPI:
 
         Returns:
             设备规格对象，不存在返回None
+
+        Raises:
+            MijiaAPIException: 网络或服务器错误（非规格不存在的情况）
         """
-        # 直接使用设备服务中的规格仓储
+        from .domain.exceptions import SpecNotFoundError, MijiaAPIException
+
         try:
-            return self._device_service._spec_repo.get_spec(model)
-        except Exception:
+            return self._device_service.get_device_spec(model)
+        except SpecNotFoundError:
+            # 规格确实不存在，返回None
             return None
+        except MijiaAPIException:
+            # 网络/服务器错误，继续抛出
+            raise
+        except Exception as e:
+            # 其他未知错误，包装后抛出
+            raise MijiaAPIException(f"获取设备规格失败: {e}") from e
     
     def get_device_properties(self, requests: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """批量获取设备属性
@@ -317,8 +328,8 @@ class MijiaAPI:
             >>> ]
             >>> results = api.get_device_properties(requests)
         """
-        # 直接使用设备服务中的设备仓储
-        return self._device_service._device_repo.batch_get_properties(requests, self._credential)
+        # 通过设备服务批量获取属性
+        return self._device_service.batch_get_properties(requests, self._credential)
 
     def update_credential(self, credential: Credential) -> None:
         """更新凭据
@@ -375,6 +386,30 @@ class MijiaAPI:
         """
         if self._cache_manager:
             self._cache_manager.clear()
+
+    def close(self) -> None:
+        """关闭API客户端，释放底层HTTP连接池资源。
+
+        应在不再使用客户端时调用（如插件关闭时）。
+        """
+        try:
+            # 关闭底层 HttpClient（持有 httpx.Client 连接池）
+            # DeviceRepositoryImpl 使用 _http 属性存储 HttpClient
+            repo = getattr(self._device_service, '_device_repo', None)
+            if repo:
+                http_client = getattr(repo, '_http', None)
+                if http_client and hasattr(http_client, 'close'):
+                    http_client.close()
+        except Exception:
+            pass  # 关闭时忽略错误
+
+    def __enter__(self):
+        """上下文管理器入口"""
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """上下文管理器出口，自动关闭资源"""
+        self.close()
 
 
 class AsyncMijiaAPI:
@@ -521,7 +556,7 @@ class AsyncMijiaAPI:
         device_id: str,
         siid: int,
         aiid: int,
-        params: Optional[Dict[str, Any]] = None,
+        params: Optional[List[Any]] = None,
         refresh_cache: bool = True,
     ) -> Any:
         """异步调用设备操作
@@ -532,7 +567,7 @@ class AsyncMijiaAPI:
             device_id: 设备ID
             siid: 服务ID
             aiid: 操作ID
-            params: 操作参数（可选）
+            params: 操作参数列表（可选）
             refresh_cache: 是否在操作后刷新缓存，默认为True
 
         Returns:
@@ -540,10 +575,10 @@ class AsyncMijiaAPI:
 
         Example:
             >>> # 调用操作并自动刷新缓存（推荐）
-            >>> await api.call_device_action("device_123", 2, 1, {"mode": "auto"})
+            >>> await api.call_device_action("device_123", 2, 1, ["auto"])
             >>>
             >>> # 调用操作但不刷新缓存
-            >>> await api.call_device_action("device_123", 2, 1, {"mode": "auto"}, refresh_cache=False)
+            >>> await api.call_device_action("device_123", 2, 1, ["auto"], refresh_cache=False)
         """
         import asyncio
 
@@ -552,7 +587,7 @@ class AsyncMijiaAPI:
             device_id,
             siid,
             aiid,
-            params or {},
+            params or [],
             self._credential,
         )
 
@@ -685,11 +720,20 @@ class AsyncMijiaAPI:
             return None
         import asyncio
 
+        from .domain.exceptions import SpecNotFoundError, MijiaAPIException
+
         def _get_spec():
             try:
-                return self._device_service._spec_repo.get_spec(model)
-            except Exception:
+                return self._device_service.get_device_spec(model)
+            except SpecNotFoundError:
+                # 规格确实不存在，返回None
                 return None
+            except MijiaAPIException:
+                # 网络/服务器错误，继续抛出
+                raise
+            except Exception as e:
+                # 其他未知错误，包装后抛出
+                raise MijiaAPIException(f"获取设备规格失败: {e}") from e
 
         return await asyncio.to_thread(_get_spec)
 

@@ -3,6 +3,7 @@
 封装设备相关的业务逻辑。
 """
 
+import logging
 from typing import Any, Dict, List, Optional
 
 from ..domain.exceptions import (
@@ -13,6 +14,8 @@ from ..domain.exceptions import (
 from ..domain.models import Credential, Device, DeviceProperty
 from ..infrastructure.cache_manager import CacheManager
 from ..repositories.interfaces import IDeviceRepository, IDeviceSpecRepository
+
+logger = logging.getLogger(__name__)
 
 
 class DeviceService:
@@ -122,8 +125,9 @@ class DeviceService:
         except (PropertyReadOnlyError, ValidationError):
             # 验证错误需要抛出
             raise
-        except Exception:
-            # 规格获取失败不影响控制，跳过验证
+        except Exception as e:
+            # 规格获取失败不影响控制，但记录日志便于调试
+            logger.debug(f"设备规格获取失败，跳过验证: {e}")
             pass
 
         # 5. 调用仓储层设置属性
@@ -134,7 +138,7 @@ class DeviceService:
         device_id: str,
         siid: int,
         aiid: int,
-        params: Dict[str, Any],
+        params: List[Any],
         credential: Credential,
     ) -> Any:
         """调用设备操作
@@ -143,7 +147,7 @@ class DeviceService:
             device_id: 设备ID
             siid: 服务ID
             aiid: 操作ID
-            params: 操作参数
+            params: 操作参数列表
             credential: 用户凭据
 
         Returns:
@@ -159,19 +163,53 @@ class DeviceService:
         自动分组处理，每组最多20个请求，避免单次请求过大。
 
         Args:
-            requests: 批量请求列表，每个请求包含设备ID、siid、piid、value等信息
+            requests: 批量请求列表，每个请求包含device_id/did、siid、piid、value等信息
             credential: 用户凭据
 
         Returns:
             批量操作结果列表
         """
+        # 规范化请求：将 device_id 转换为 did
+        normalized_requests = []
+        for req in requests:
+            normalized = dict(req)  # 复制一份避免修改原数据
+            # 支持 device_id 或 did 作为设备ID字段
+            if "device_id" in normalized and "did" not in normalized:
+                normalized["did"] = normalized.pop("device_id")
+            normalized_requests.append(normalized)
+
         # 分组处理，每组最多20个请求
         batch_size = 20
         results: List[Dict[str, Any]] = []
 
-        for i in range(0, len(requests), batch_size):
-            batch = requests[i : i + batch_size]
+        for i in range(0, len(normalized_requests), batch_size):
+            batch = normalized_requests[i : i + batch_size]
             batch_results = self._device_repo.batch_set_properties(batch, credential)
             results.extend(batch_results)
 
         return results
+
+    def get_device_spec(self, model: str) -> Any:
+        """获取设备规格
+
+        Args:
+            model: 设备型号
+
+        Returns:
+            设备规格对象
+        """
+        return self._spec_repo.get_spec(model)
+
+    def batch_get_properties(
+        self, requests: List[Dict[str, Any]], credential: Credential
+    ) -> List[Dict[str, Any]]:
+        """批量获取设备属性
+
+        Args:
+            requests: 请求列表，每个请求包含did、siid、piid
+            credential: 用户凭据
+
+        Returns:
+            结果列表，每个结果包含code、siid、piid、value
+        """
+        return self._device_repo.batch_get_properties(requests, credential)

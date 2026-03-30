@@ -5,12 +5,12 @@
 
 import json
 import re
-from typing import Optional
+from typing import Dict, List, Optional
 
 import httpx
 
 from ..core.logging import get_logger
-from ..domain.exceptions import MijiaAPIException
+from ..domain.exceptions import MijiaAPIException, SpecNotFoundError
 from ..domain.models import DeviceAction, DeviceProperty, PropertyAccess, PropertyType, ActionParameter
 from ..infrastructure.cache_manager import CacheManager
 from ..infrastructure.http_client import HttpClient
@@ -94,6 +94,46 @@ class DeviceSpecRepositoryImpl(IDeviceSpecRepository):
         self._cache.set(cache_key, spec.model_dump(), ttl=365 * 24 * 3600, namespace="specs")
         logger.info(f"设备规格已缓存: {model}")
 
+    def _get_instances_index(self) -> Dict[str, str]:
+        """获取设备型号到 type 的映射索引，带缓存
+
+        Returns:
+            {model: type} 的字典
+        """
+        cache_key = "miot_spec:instances_index"
+
+        # 尝试从缓存获取
+        cached = self._cache.get(cache_key, namespace="specs")
+        if cached:
+            return cached
+
+        # 从网络获取
+        try:
+            instances_url = "https://miot-spec.org/miot-spec-v2/instances?status=released"
+            headers = {"User-Agent": "mijiaAPI_V2/2.0.0"}
+
+            response = httpx.get(instances_url, headers=headers, timeout=30)
+            response.raise_for_status()
+            instances_data = response.json()
+
+            # 构建索引
+            index = {}
+            for instance in instances_data.get("instances", []):
+                model = instance.get("model")
+                device_type = instance.get("type")
+                if model and device_type:
+                    index[model] = device_type
+
+            # 缓存索引（7天）
+            self._cache.set(cache_key, index, ttl=7 * 24 * 3600, namespace="specs")
+            logger.info(f"instances 索引已缓存，共 {len(index)} 个设备")
+
+            return index
+
+        except Exception as e:
+            logger.error(f"获取 instances 索引失败: {e}")
+            return {}
+
     def _fetch_spec_from_network(self, model: str) -> Optional[DeviceSpec]:
         """从网络获取设备规格
 
@@ -107,25 +147,15 @@ class DeviceSpecRepositoryImpl(IDeviceSpecRepository):
             MijiaAPIException: 网络请求失败或解析失败
         """
         try:
-            # 步骤1: 从instances列表中查找设备的type
-            instances_url = "https://miot-spec.org/miot-spec-v2/instances?status=released"
-            headers = {"User-Agent": "mijiaAPI_V2/2.0.0"}
-            
-            response = httpx.get(instances_url, headers=headers, timeout=30)
-            response.raise_for_status()
-            instances_data = response.json()
-            
-            # 查找匹配的设备
-            device_type = None
-            for instance in instances_data.get("instances", []):
-                if instance.get("model") == model:
-                    device_type = instance.get("type")
-                    break
-            
+            # 步骤1: 从缓存的索引中查找设备的type
+            index = self._get_instances_index()
+            device_type = index.get(model)
+
             if not device_type:
-                raise MijiaAPIException(f"未找到设备型号 {model} 的规格定义")
-            
+                raise SpecNotFoundError(f"未找到设备型号 {model} 的规格定义")
+
             # 步骤2: 使用type获取完整规格
+            headers = {"User-Agent": "mijiaAPI_V2/2.0.0"}
             spec_url = f"https://miot-spec.org/miot-spec-v2/instance?type={device_type}"
             response = httpx.get(spec_url, headers=headers, timeout=30)
             response.raise_for_status()
@@ -169,15 +199,17 @@ class DeviceSpecRepositoryImpl(IDeviceSpecRepository):
                 if not siid:
                     continue
 
-                # 解析属性
+                # 先解析属性，建立索引用于 action 参数回填
+                service_properties: Dict[int, DeviceProperty] = {}
                 for prop in service.get("properties", []):
                     device_property = self._parse_property(siid, prop)
                     if device_property:
                         properties.append(device_property)
+                        service_properties[device_property.piid] = device_property
 
-                # 解析操作
+                # 解析操作（传入属性索引用于参数解析）
                 for action in service.get("actions", []):
-                    device_action = self._parse_action(siid, action)
+                    device_action = self._parse_action(siid, action, service_properties)
                     if device_action:
                         actions.append(device_action)
 
@@ -281,14 +313,23 @@ class DeviceSpecRepositoryImpl(IDeviceSpecRepository):
             # 单位
             unit = prop_data.get("unit")
 
+            # 确定访问权限
+            if readable and writable:
+                access = PropertyAccess.READ_WRITE
+            elif readable:
+                access = PropertyAccess.READ_ONLY
+            elif writable:
+                access = PropertyAccess.WRITE_ONLY
+            else:
+                # 既没有 read 也没有 write，默认只读（避免误判为可写）
+                access = PropertyAccess.READ_ONLY
+
             return DeviceProperty(
                 siid=siid,
                 piid=piid,
                 name=name,
                 type=prop_type,
-                access=PropertyAccess.READ_WRITE if (readable and writable) else (
-                    PropertyAccess.READ_ONLY if readable else PropertyAccess.WRITE_ONLY
-                ),
+                access=access,
                 value_range=value_range,
                 value_list=value_list,
                 unit=unit,
@@ -441,12 +482,18 @@ class DeviceSpecRepositoryImpl(IDeviceSpecRepository):
             # 默认为只读
             return PropertyAccess.READ_ONLY
 
-    def _parse_action(self, siid: int, action_data: dict) -> Optional[DeviceAction]:
+    def _parse_action(
+        self,
+        siid: int,
+        action_data: dict,
+        properties_map: Optional[Dict[int, DeviceProperty]] = None
+    ) -> Optional[DeviceAction]:
         """解析设备操作
 
         Args:
             siid: 服务ID
             action_data: 操作数据
+            properties_map: 同服务下的属性索引，用于解析 action 参数
 
         Returns:
             设备操作对象，解析失败返回None
@@ -459,8 +506,23 @@ class DeviceSpecRepositoryImpl(IDeviceSpecRepository):
             # 操作名称
             name = action_data.get("description", f"action_{aiid}")
 
-            # 参数列表（暂时不解析参数，后续可以扩展）
-            parameters: list[ActionParameter] = []
+            # 解析输入参数
+            parameters: List[ActionParameter] = []
+            for param_iid in action_data.get("in", []):
+                if properties_map and param_iid in properties_map:
+                    prop = properties_map[param_iid]
+                    parameters.append(ActionParameter(
+                        name=prop.name,
+                        type=prop.type,
+                        required=True,
+                    ))
+                else:
+                    # 找不到对应属性，使用通用参数名
+                    parameters.append(ActionParameter(
+                        name=f"param_{param_iid}",
+                        type=PropertyType.STRING,
+                        required=True,
+                    ))
 
             return DeviceAction(siid=siid, aiid=aiid, name=name, parameters=parameters)
 

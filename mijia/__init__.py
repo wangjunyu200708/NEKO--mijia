@@ -56,10 +56,14 @@ class MijiaPlugin(NekoPluginBase):
                 self.logger.info("米家插件启动成功，已加载已有凭据")
             except Exception as e:
                 self.logger.error(f"API初始化失败，插件将在未登录状态下运行: {e}")
-                asyncio.create_task(self._auto_open_config_page())
+                task = asyncio.create_task(self._auto_open_config_page())
+                self._background_tasks.add(task)
+                task.add_done_callback(self._background_tasks.discard)
         else:
             self.logger.warning("未找到有效凭据，请在Web UI中登录")
-            asyncio.create_task(self._auto_open_config_page())
+            task = asyncio.create_task(self._auto_open_config_page())
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
         # 注册静态UI
         # register_static_ui 接受相对目录名，内部会拼接 self.config_dir / directory
         # static/ 目录下的入口文件为 config.html
@@ -564,17 +568,30 @@ class MijiaPlugin(NekoPluginBase):
         
         cmd = command.lower().strip()
         
-        # 判断开关
+        # 判断开关并提取设备名
+        # 优先匹配长词，且只移除开头的控制词（避免误删设备名中的字）
         turn_on = None
-        if any(k in cmd for k in ["打开", "开启", "开"]):
-            turn_on = True
-        elif any(k in cmd for k in ["关闭", "关掉", "关"]):
-            turn_on = False
-        else:
-            return Err(SdkError("请说'打开'或'关闭'"))
+        device_name = cmd
         
-        # 提取设备名：按长词优先用正则移除关键词（避免短词误伤设备名中的字）
-        device_name = re.sub(r'打开|开启|关闭|关掉|开|关', '', cmd).strip()
+        # 按长度降序排列，优先匹配长词
+        open_keywords = ["打开", "开启", "开"]
+        close_keywords = ["关闭", "关掉", "关"]
+        
+        for keyword in open_keywords:
+            if device_name.startswith(keyword):
+                turn_on = True
+                device_name = device_name[len(keyword):].strip()
+                break
+        
+        if turn_on is None:
+            for keyword in close_keywords:
+                if device_name.startswith(keyword):
+                    turn_on = False
+                    device_name = device_name[len(keyword):].strip()
+                    break
+        
+        if turn_on is None:
+            return Err(SdkError("请说'打开'或'关闭'"))
         
         if not device_name:
             return Err(SdkError("请指定设备名，如'打开插座'"))
@@ -593,6 +610,14 @@ class MijiaPlugin(NekoPluginBase):
         
         if not devices:
             return Err(SdkError(f"未找到'{device_name}'"))
+        
+        # 多设备匹配时返回歧义错误，避免误操作
+        if len(devices) > 1:
+            device_names = [d.get("name", "未知") for d in devices]
+            return Err(SdkError(
+                f"找到多个匹配 '{device_name}' 的设备: {', '.join(device_names)}。"
+                f"请使用更精确的设备名称，或通过 find_device_by_name 查看完整列表后使用 control_device 精确控制。"
+            ))
         
         device = devices[0]
         self.logger.info(f"设备数据: {device}")
@@ -692,13 +717,13 @@ class MijiaPlugin(NekoPluginBase):
                 "device_id": {"type": "string", "description": "设备 ID（did）"},
                 "siid": {"type": "integer", "description": "服务 ID"},
                 "aiid": {"type": "integer", "description": "操作 ID"},
-                "params": {"type": "object", "description": "操作参数，可选"}
+                "params": {"type": "array", "description": "操作参数列表，可选"}
             },
             "required": ["device_id", "siid", "aiid"]
         },
         llm_result_fields=["message"]
     )
-    async def call_device_action(self, device_id: str, siid: int, aiid: int, params: Optional[dict] = None, **_):
+    async def call_device_action(self, device_id: str, siid: int, aiid: int, params: Optional[list] = None, **_):
         if not self.api:
             return Err(SdkError("未登录"))
         try:
@@ -718,17 +743,18 @@ class MijiaPlugin(NekoPluginBase):
         input_schema={
             "type": "object",
             "properties": {
-                "scene_id": {"type": "string", "description": "场景 ID"}
+                "scene_id": {"type": "string", "description": "场景 ID"},
+                "home_id": {"type": "string", "description": "家庭 ID"}
             },
-            "required": ["scene_id"]
+            "required": ["scene_id", "home_id"]
         },
         llm_result_fields=["message"]
     )
-    async def execute_scene(self, scene_id: str, **_):
+    async def execute_scene(self, scene_id: str, home_id: str, **_):
         if not self.api:
             return Err(SdkError("未登录"))
         try:
-            success = await self.api.execute_scene(scene_id)
+            success = await self.api.execute_scene(scene_id, home_id)
             if success:
                 message = f"✅ 场景执行成功 (ID: {scene_id})"
                 return Ok({"success": True, "message": message})

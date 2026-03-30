@@ -8,7 +8,7 @@
 
 | 能力 | 说明 |
 |------|------|
-| 账号登录 | 扫码登录小米账号，凭据本地加密存储 |
+| 账号登录 | 扫码登录小米账号，凭据本地安全存储（文件权限保护） |
 | 设备发现 | 获取家庭下全部设备，自动缓存规格信息 |
 | 智能控制 | 自然语言一句话开关设备 |
 | 状态查询 | 批量读取设备所有可读属性 |
@@ -142,7 +142,7 @@ find_device_by_name(name="插座")
 - `value`：目标值，类型须与属性 type 一致（bool/int/float/string）
 
 **示例：把台灯亮度设为 80**
-```
+```python
 # 1. 查找设备
 find_device_by_name(name="台灯")
 # → devices[0].did = "xxx", properties 中找到亮度: siid=2, piid=3
@@ -189,7 +189,16 @@ control_device(device_id="xxx", siid=2, piid=3, value=80)
 
 触发在米家 App 中创建的智能场景（如"回家模式"、"睡眠模式"）。
 
+**参数**
+- `scene_id`: 场景 ID
+- `home_id`: 家庭 ID
+
 **获取 scene_id**：目前需通过米家 App 查看或抓包获取，插件暂不提供场景列表入口。
+
+**示例**
+```python
+execute_scene(scene_id="123456", home_id="abcdef")
+```
 
 ---
 

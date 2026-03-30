@@ -133,6 +133,10 @@ class DeviceRepositoryImpl(IDeviceRepository):
             }
             response = self._http.post(uri, json=data, credential=credential)
             homes = response.get("result", {}).get("homelist", [])
+            # 缓存家庭列表（使用较长的TTL，因为家庭信息变化较少）
+            self._cache.set(
+                cache_key, homes, ttl=3600, namespace=credential.user_id
+            )
         
         # 查找对应的家庭
         for home in homes:
@@ -270,7 +274,7 @@ class DeviceRepositoryImpl(IDeviceRepository):
         return success
 
     def call_action(
-        self, device_id: str, siid: int, aiid: int, params: Dict[str, Any], credential: Credential
+        self, device_id: str, siid: int, aiid: int, params: List[Any], credential: Credential
     ) -> Any:
         """调用设备操作
 
@@ -278,16 +282,14 @@ class DeviceRepositoryImpl(IDeviceRepository):
             device_id: 设备ID
             siid: 服务ID
             aiid: 操作ID
-            params: 操作参数字典，会被转换为参数值列表
+            params: 操作参数列表
             credential: 用户凭据
 
         Returns:
             操作结果
         """
-        # 将参数字典转换为参数值列表
-        # 如果 params 是空字典，则使用空列表
-        # 如果 params 有值，则提取值列表
-        param_values = list(params.values()) if params else []
+        # 参数已经是列表格式
+        param_values = params if params else []
         
         # 构建请求参数（使用旧版本的格式）
         request_data = {
