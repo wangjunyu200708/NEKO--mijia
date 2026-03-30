@@ -1,235 +1,320 @@
-# 米家智能设备插件 - 使用文档
+# 米家智能家居插件
 
-## 📖 概述
-米家智能设备插件是一个基于 N.E.K.O 插件系统开发的插件，用于连接和控制米家（Mi Home）智能设备。通过该插件，你可以使用自然语言控制米家设备，实现智能家居的语音控制。
+基于小米 MiOT 协议，通过 N.E.K.O AI 控制米家智能设备。
 
-## ✨ 功能特性
-*   **🔐 支持多种登录方式**：账号密码 / 二维码扫码
-*   **🏠 自动发现米家设备**
-*   **📊 获取设备状态和属性**
-*   **🎮 控制设备开关、调节参数**
-*   **🔄 设备信息缓存，提高响应速度**
-*   **💾 认证数据持久化存储**
-*   **🚀 异步并发设备发现**
+---
 
-## 📋 前置要求
-*   N.E.K.O 框架（版本 >= 0.1.0）
-*   米家账号
+## 功能概览
 
-## 🚀 快速开始
+| 能力 | 说明 |
+|------|------|
+| 账号登录 | 扫码登录小米账号，凭据本地加密存储 |
+| 设备发现 | 获取家庭下全部设备，自动缓存规格信息 |
+| 智能控制 | 自然语言一句话开关设备 |
+| 状态查询 | 批量读取设备所有可读属性 |
+| 精确控制 | 按 siid/piid 写入任意属性值 |
+| 操作调用 | 触发扫地、播放等预定义 Action |
+| 场景联动 | 执行米家 App 中预设的智能场景 |
 
-### 1. 安装插件
-将插件放置在 N.E.K.O 的插件目录下：
+---
 
-```N.E.K.O/plugin/plugins/mijia/```
+## 快速上手
 
-### 2. 配置账号
-**方式一：通过 AI 对话配置**
+### 第一步：登录
 
-请配置米家插件，账号是 ，密码是 
+首次使用需扫码登录小米账号：
 
-**方式二：通过 HTTP API 配置**
-```bash
- curl -X POST http://localhost:48916/plugin/trigger \
-   -H "Content-Type: application/json" \
-   -d '{
-     "plugin_id": "mijia",
-     "entry_id": "update_config",
-     "args": {
-       "username": "你的账号",
-       "password": "你的密码",
-       "enableQR": false,
-       "auto_connect": true
-     }
-   }'
+1. 启动 N.E.K.O，插件会自动打开配置页面
+2. 或手动访问：`http://localhost:48916/plugin/mijia/ui/`
+3. 扫描页面上的二维码，完成授权
+4. 登录成功后凭据自动保存，重启不需要重新登录
+
+### 第二步：获取设备
+
+登录后告诉 AI 获取设备列表，AI 会自动缓存全部设备信息（含属性/操作规格）：
+
+> "帮我列一下米家的设备"
+
+### 第三步：开始控制
+
+直接对 AI 说指令即可：
+
+> "打开客厅插座"  
+> "把台灯关掉"  
+> "查一下空调现在的状态"
+
+---
+
+## 入口说明
+
+### `smart_control` — 智能控制设备
+
+自然语言控制设备开关，自动完成"查找设备 → 识别开关属性 → 执行控制"全流程。
+
+**支持的关键词**
+
+| 操作 | 关键词 |
+|------|--------|
+| 开 | 打开、开启、开 |
+| 关 | 关闭、关掉、关 |
+
+**示例**
 ```
-### 3. 连接米家
-* 请连接米家
-### 4. 发现设备
-* 请发现我的米家设备
-### 5. 控制设备
-* 请打开客厅的灯
-* 请设置空调温度为26度
-* 请关闭空气净化器
-* 请查询卧室灯的状态
-## 📚 插件入口点（Entry Points）
+smart_control(command="打开客厅插座")
+smart_control(command="关闭灯")
+```
 
-### 配置管理
-| 入口ID | 名称 | 描述 | 输入参数 |
-| :--- | :--- | :--- | :--- |
-| `update_config` | 更新配置 | 更新插件配置 | `username`, `password`, `enableQR`, `auto_connect` |
-| `get_status` | 获取状态 | 获取插件运行状态 | 无 |
+**注意**
+- 命令必须包含设备名，如"打开"（缺设备名）会报错
+- 自动匹配的开关属性优先级：名称含"开关/电源/power/switch"的可写属性 > 第一个可写 bool 属性
+- 如果设备没有可写开关属性，请改用 `control_device` 精确控制
 
-### 连接管理
-| 入口ID | 名称 | 描述 | 输入参数 |
-| :--- | :--- | :--- | :--- |
-| `connect` | 连接米家 | 连接到米家云服务 | 无 |
-| `disconnect` | 断开连接 | 断开米家云服务连接 | 无 |
+---
 
-### 设备管理
-| 入口ID | 名称 | 描述 | 输入参数 |
-| :--- | :--- | :--- | :--- |
-| `discover_devices` | 发现设备 | 发现米家设备 | `online_only`, `force_refresh` |
-| `get_devices` | 获取设备列表 | 获取已发现的设备列表 | 无 |
-| `get_device_by_name` | 按名称查找 | 根据名称查找设备 | `name` |
-| `get_device_by_did` | 按ID查找 | 根据设备ID查找设备 | `did` |
-| `search_devices` | 搜索设备 | 搜索和过滤设备 | `query`, `online_only` |
+### `query_device_state` — 查询设备状态
 
-### 设备控制
-| 入口ID | 名称 | 描述 | 输入参数 |
-| :--- | :--- | :--- | :--- |
-| `get_device_properties` | 获取设备属性 | 获取设备支持的属性列表 | `device_id` |
-| `get_property_value` | 获取属性值 | 获取设备属性的当前值 | `device_id`, `siid`, `piid` |
-| `set_property_value` | 设置属性值 | 设置设备属性的值 | `device_id`, `siid`, `piid`, `value` |
-| `call_action` | 调用动作 | 调用设备动作 | `device_id`, `siid`, `aiid`, `params` |
+按名称查询设备所有可读属性的当前值，是最常用的状态查询入口。
 
-## 🔧 配置说明
+**示例**
+```
+query_device_state(name="插座")
+```
 
-### 配置文件位置
+**返回示例**
+```
+📱 设备 '插座' 当前状态：
 
-```plugin/plugins/mijia/config.json```
+  • 开关: ✅ 开启
+  • 功率: 1250
+  • 电压: 220
+```
 
+---
 
-### 配置项说明
+### `find_device_by_name` — 根据名称查找设备
+
+从缓存中模糊匹配设备，返回设备完整信息（did、properties、actions 等）。
+
+控制设备前，AI 通常需要先调用此入口获取 `did`、`siid`、`piid`。
+
+**示例**
+```
+find_device_by_name(name="插座")
+```
+
+---
+
+### `get_cached_devices` — 获取缓存的设备列表
+
+从本地缓存读取全部设备，无网络请求，速度快。缓存不存在时自动触发 `list_devices`。
+
+**参数**
+- `refresh=true`：忽略缓存，重新从服务器拉取
+
+---
+
+### `list_devices` — 获取设备列表
+
+从服务器拉取最新设备列表，同时为每台设备请求 MiOT 规格（属性/操作），写入本地缓存。
+
+**参数**
+- `home_id`：指定家庭，留空时自动使用第一个家庭
+- `refresh=true`：强制刷新，忽略现有缓存
+
+**注意**：此入口耗时较长（需逐一获取规格），建议只在设备有增减时调用。日常查询用 `get_cached_devices`。
+
+---
+
+### `list_homes` — 获取家庭列表
+
+列出账号下所有米家家庭及 ID。`list_devices` 需要 home_id 时可先调用此入口。
+
+---
+
+### `control_device` — 控制设备属性
+
+直接向设备写入属性值，适合需要精确控制特定属性的场景（亮度、色温、定时等）。
+
+**参数**
+- `device_id`：设备 did，从 `find_device_by_name` 返回的 `devices[].did` 获取
+- `siid`：服务 ID，从设备信息的 `properties[].siid` 获取
+- `piid`：属性 ID，从设备信息的 `properties[].piid` 获取
+- `value`：目标值，类型须与属性 type 一致（bool/int/float/string）
+
+**示例：把台灯亮度设为 80**
+```
+# 1. 查找设备
+find_device_by_name(name="台灯")
+# → devices[0].did = "xxx", properties 中找到亮度: siid=2, piid=3
+
+# 2. 写入属性
+control_device(device_id="xxx", siid=2, piid=3, value=80)
+```
+
+---
+
+### `get_device_status` — 获取设备单个属性值
+
+读取设备的某一具体属性值。适合只需查询某个特定属性（不需要全量状态）的场景。
+
+**参数**：`device_id`、`siid`、`piid`（均从设备信息中获取）
+
+---
+
+### `get_device_spec` — 获取设备规格
+
+查询设备型号的 MiOT 规格，列出全部可控属性和可调用操作，帮助 AI 了解设备能力边界。
+
+**参数**：`model`，设备型号字符串，如 `cuco.plug.v3`，从 `get_cached_devices` 返回的 `devices[].model` 获取。
+
+**返回内容**
+- `properties`：属性列表（siid、piid、name、type、access、value_range）
+- `actions`：操作列表（siid、aiid、name、parameters）
+
+---
+
+### `call_device_action` — 调用设备操作
+
+触发设备的预定义 Action，如扫地机开始清扫、音箱播放音乐等。
+
+**参数**
+- `device_id`：设备 did
+- `siid`：服务 ID（从 `get_device_spec` 的 `actions[].siid` 获取）
+- `aiid`：操作 ID（从 `get_device_spec` 的 `actions[].aiid` 获取）
+- `params`：操作参数（可选，部分 Action 无需参数）
+
+---
+
+### `execute_scene` — 执行智能场景
+
+触发在米家 App 中创建的智能场景（如"回家模式"、"睡眠模式"）。
+
+**获取 scene_id**：目前需通过米家 App 查看或抓包获取，插件暂不提供场景列表入口。
+
+---
+
+### `logout` — 登出
+
+清除本地凭据文件和所有缓存数据（`data/` 目录），退出登录状态。
+
+---
+
+## 数据文件
+
+所有数据保存在插件的 `data/` 目录下：
+
+| 文件 | 内容 | 说明 |
+|------|------|------|
+| `credential.json` | 登录凭据 | 权限 600，仅当前用户可读 |
+| `devices_cache.json` | 设备列表及规格缓存 | 包含 did、properties、actions |
+
+### 缓存结构（devices_cache.json）
 
 ```json
 {
-  "username": "米家账号（手机号/邮箱）",
-  "password": "米家密码",
-  "enableQR": true,      // true: 二维码登录, false: 账号密码登录
-  "auto_connect": false, // true: 插件启动时自动连接
-  "log_level": "INFO"    // 日志级别
+  "home_id": "xxx",
+  "devices": [
+    {
+      "did": "设备唯一ID",
+      "name": "设备名称",
+      "model": "设备型号",
+      "is_online": true,
+      "room_id": "房间ID",
+      "properties": [
+        {
+          "siid": 2,
+          "piid": 1,
+          "name": "开关",
+          "type": "bool",
+          "access": "read_write",
+          "value_range": null,
+          "value_list": null
+        }
+      ],
+      "actions": [
+        {
+          "siid": 2,
+          "aiid": 1,
+          "name": "开始清扫"
+        }
+      ]
+    }
+  ]
 }
 ```
-## 📝 API 使用示例
 
-### 1. 更新配置
+---
+
+## 属性权限说明
+
+`properties[].access` 字段含义：
+
+| 值 | 说明 |
+|----|------|
+| `read` | 只读，可查询不可写入 |
+| `write` | 只写，可写入不可查询 |
+| `read_write` | 读写，可查询和写入 |
+| `notify` | 事件通知 |
+| `notify_read` / `notify_read_write` | 含通知的读/读写属性 |
+
+---
+
+## 常见问题
+
+**Q：控制命令无效，提示"没有可控制的开关"**  
+A：该设备可能不支持简单开关控制，请用 `get_device_spec` 查看完整属性列表，再用 `control_device` 精确控制。
+
+**Q：设备不在线**  
+A：请检查设备电源和网络，或尝试重启设备。离线设备的控制请求会被服务器拒绝。
+
+**Q：凭据过期**  
+A：插件每天自动检查凭据有效期，临近过期时自动续期。若自动续期失败，请重新扫码登录。
+
+**Q：设备列表不更新**  
+A：调用 `get_cached_devices(refresh=true)` 或 `list_devices(refresh=true)` 强制刷新。
+
+**Q：`list_devices` 太慢**  
+A：正常现象，首次获取需为每台设备单独请求 MiOT 规格，设备越多越慢。建议只在设备变更时调用一次，日常使用缓存即可。
+
+---
+
+## 返回格式
+
+所有入口均返回包含 `message` 字段的标准格式，AI 可直接读取 `message` 向用户展示。
 
 ```python
-#通过跨插件调用
-result = await self.plugins.call_entry(
-    "mijia:update_config",
-    {
-        "username": "13800138000",
-        "password": "your_password"
-    }
-)
+# 成功
+{
+    "success": True,
+    "message": "✅ 已打开'插座'",
+    ...其他字段
+}
+
+# 失败（返回 Err，AI 会收到错误信息）
+Err(SdkError("设备离线"))
 ```
-### 2. 连接米家
 
-```python
-result = await self.plugins.call_entry("mijia:connect")
-if isinstance(result, Ok):
-    print("连接成功")
-else:
-    print(f"连接失败: {result.error}")
-```
-### 3. 发现设备
+### Emoji 图例
 
-```python
-result = await self.plugins.call_entry(
-    "mijia:discover_devices",
-    {
-        "online_only": True,      # 只返回在线设备
-        "force_refresh": True     # 强制刷新，不使用缓存
-    }
-)
+| 图标 | 含义 |
+|------|------|
+| ✅ | 操作成功 / 属性开启 |
+| ❌ | 操作失败 / 属性关闭 |
+| 🟢 | 设备在线 |
+| 🔴 | 设备离线 |
+| 📱 | 设备 / 状态 |
+| 📊 | 单个属性值 |
+| 📋 | 规格信息 |
+| 🏠 | 家庭 |
+| 🔍 | 搜索结果 |
+| ▶ | 操作 |
+| 🔘 | 可写属性 |
+| 👁 | 只读属性 |
 
-if isinstance(result, Ok):
-    devices = result.value["devices"]
-    for device in devices:
-        print(f"设备: {device['name']} (ID: {device['did']})")
-```
-### 4. 控制设备
+---
 
-```python
-#设置设备属性（例如：打开开关）
-result = await self.plugins.call_entry(
-    "mijia:set_property_value",
-    {
-        "device_id": "设备ID",
-        "siid": 2,      # 服务实例ID
-        "piid": 1,      # 属性实例ID
-        "value": True   # 设置的值
-    }
-)
+## 依赖
 
-#调用设备动作
-result = await self.plugins.call_entry(
-    "mijia:call_action",
-    {
-        "device_id": "设备ID",
-        "siid": 2,      # 服务实例ID
-        "aiid": 1,      # 动作实例ID
-        "params": []    # 动作参数
-    }
-)
-```
-### 5. 获取设备状态
-```python
-获取设备状态
-result = await self.plugins.call_entry("mijia:get_status")
-if isinstance(result, Ok):
-    status = result.value
-    print(f"连接状态: {status['connected']}")
-    print(f"设备数量: {status['device_count']}")
-```
-## 🔄 工作流程
-1.  配置账号
-2.  连接米家
-3.  发现设备
-4.  获取设备详细
-5.  控制设备
-6.  查询状态
-
-## 🛠️ 开发调试
-
-### 日志查看
-插件日志输出到 N.E.K.O 的主日志中，包含以下关键信息：
-*   连接状态变化
-*   设备发现过程
-*   设备控制结果
-*   错误和异常信息
-
-## ❓ 常见问题
-
-### 1. 连接失败
-*   检查账号密码是否正确
-*   检查网络连接
-*   尝试使用二维码登录
-
-### 2. 设备发现失败
-*   确保已成功连接
-*   检查设备是否在线
-*   尝试使用 `force_refresh: true`
-
-### 3. 设备控制失败
-*   确认设备支持该属性/动作
-*   检查参数格式是否正确
-*   查看设备是否在线
-
-## 📁 文件结构
-
->mijia/
->├── __init__.py              # 插件主入口
->├── adapter/
->│   └── mijia_adapter.py     # 米家适配器
->├── config/
->│   └── mijia_config.py      # 配置管理
->├── utils/
->│   ├── auth_manager.py      # 认证数据管理
->│   └── logger.py            # 日志工具
->├── data/                    # 运行时数据目录
->│   ├── config.json          # 插件配置
->│   ├── devices.json         # 设备缓存
->│   └── auth_data.json       # 认证数据
->└── plugin.toml              # 插件描述文件
-
-## 📄 许可证
-本插件遵循 N.E.K.O 框架的许可证协议。
-
-## 🤝 贡献
-欢迎提交 Issue 和 Pull Request！
-
-## 📮 联系方式
-如有问题，请在 N.E.K.O 项目中提交 Issue。
+- Python 3.11+
+- 内嵌 `mijia_api` 模块（无需额外安装）
+- 外部依赖见项目根目录 `requirements.txt`
