@@ -30,6 +30,7 @@ class MijiaPlugin(NekoPluginBase):
         self.auth_service: Optional[AuthService] = None
         self.credential_path: Optional[Path] = None
         self._lock = asyncio.Lock()
+        self._background_tasks: set = set()  # 持有后台 Task 引用，防止被 GC 提前回收
 
     # ========== 生命周期 ==========
     @lifecycle(id="startup")
@@ -66,7 +67,7 @@ class MijiaPlugin(NekoPluginBase):
             task.add_done_callback(self._background_tasks.discard)
         # 注册静态UI
         # register_static_ui 接受相对目录名，内部会拼接 self.config_dir / directory
-        # static/ 目录下的入口文件为 config.html
+        # static/ 目录下的入口文件为 index.html
         if (self.config_dir / "static").exists():
             ok = self.register_static_ui(
                 "static",
@@ -76,7 +77,7 @@ class MijiaPlugin(NekoPluginBase):
             if ok:
                 self.logger.info("已注册米家配置页面，访问路径: /plugin/mijia/ui/")
             else:
-                self.logger.warning("注册静态UI失败，请检查 static/config.html 是否存在")
+                self.logger.warning("注册静态UI失败，请检查 static/index.html 是否存在")
 
         return Ok({"status": "ready"})
     
@@ -92,6 +93,15 @@ class MijiaPlugin(NekoPluginBase):
     async def on_shutdown(self, **_):
         """插件关闭：清理资源"""
         self.logger.info("米家插件关闭")
+
+        # 取消所有后台任务
+        if self._background_tasks:
+            for task in list(self._background_tasks):
+                task.cancel()
+            if self._background_tasks:
+                await asyncio.gather(*self._background_tasks, return_exceptions=True)
+                self._background_tasks.clear()
+
         if self.api:
             try:
                 await self.api.close()
@@ -145,10 +155,17 @@ class MijiaPlugin(NekoPluginBase):
                 ).strip()
                 path_str = str(self.credential_path)
                 # 先移除所有继承权限，再授权当前用户完全控制
-                subprocess.run(
+                result = subprocess.run(
                     ["icacls", path_str, "/inheritance:r", "/grant:r", f"{username}:F"],
-                    check=False, capture_output=True
+                    check=False, capture_output=True, text=True
                 )
+                if result.returncode != 0:
+                    self.logger.warning(
+                        f"设置凭据文件权限失败(Windows): icacls 返回码 {result.returncode}"
+                        + (f", stderr: {result.stderr.strip()}" if result.stderr.strip() else "")
+                    )
+                else:
+                    self.logger.debug("凭据文件权限已设置（仅当前用户）")
             except Exception as e:
                 self.logger.warning(f"设置凭据文件权限失败(Windows): {e}")
         else:
@@ -228,16 +245,28 @@ class MijiaPlugin(NekoPluginBase):
 
     async def _init_api(self, credential: Credential):
         """使用凭据初始化API客户端"""
+        # 先构建新实例，探活成功后再替换，避免旧连接在验证期间被提前丢弃
+        new_api = create_async_api_client(credential)
         try:
-            # create_async_api_client 是同步工厂函数，返回 AsyncMijiaAPI 实例
-            self.api = create_async_api_client(credential)
-            # 测试连接（异步方法）
-            await self.api.get_homes()
-            self.logger.info("API客户端初始化成功")
+            await new_api.get_homes()
         except Exception as e:
             self.logger.error(f"API初始化失败: {e}")
-            self.api = None
+            try:
+                await new_api.close()
+            except Exception:
+                pass
             raise
+        
+        # 验证通过，关闭旧客户端后原子替换
+        old_api = self.api
+        self.api = new_api
+        if old_api is not None:
+            try:
+                await old_api.close()
+            except Exception as close_err:
+                self.logger.warning(f"关闭旧API客户端时出错: {close_err}")
+        
+        self.logger.info("API客户端初始化成功")
 
     async def _reload_credential(self):
         """重新加载凭据（如配置变化）"""
@@ -246,7 +275,14 @@ class MijiaPlugin(NekoPluginBase):
             if credential:
                 await self._init_api(credential)
             else:
+                # 关闭旧 client 再置 None，防止 HttpClient / CacheManager 资源泄漏
+                old_api = self.api
                 self.api = None
+                if old_api is not None:
+                    try:
+                        await old_api.close()
+                    except Exception as close_err:
+                        self.logger.warning(f"关闭旧API客户端时出错: {close_err}")
 
     # ========== 定时刷新凭据 ==========
     @timer_interval(id="refresh_credential", seconds=86400, auto_start=True)  # 每天一次
@@ -256,16 +292,21 @@ class MijiaPlugin(NekoPluginBase):
             return Ok({"skipped": "no_api"})
         new_cred = None
         credential = self.api.credential
-        if credential and not credential.is_expired():
-            # 如果将在7天内过期，尝试刷新
-            if credential.expires_in() < 7 * 86400:
+        if credential:
+            # 同时处理"7天内即将过期"和"已经过期但尚未处理"两种情况
+            if not credential.is_expired() and credential.expires_in() >= 7 * 86400:
+                return Ok({"skipped": "not_near_expiry"})
+            # 已过期或在7天内，尝试刷新
+            if credential.is_expired():
+                self.logger.warning("凭据已过期，尝试刷新")
+            else:
                 self.logger.info("凭据即将过期，尝试刷新")
-                new_cred = await self._refresh_credential(credential)
-                if new_cred:
-                    await self._init_api(new_cred)
-                    self.logger.info("凭据刷新成功")
-                else:
-                    self.logger.warning("凭据刷新失败，请手动登录")
+            new_cred = await self._refresh_credential(credential)
+            if new_cred:
+                await self._init_api(new_cred)
+                self.logger.info("凭据刷新成功")
+            else:
+                self.logger.warning("凭据刷新失败，请手动登录")
         return Ok({"refreshed": new_cred is not None})
 
     # ========== Web UI 端点（供前端调用） ==========
@@ -298,7 +339,14 @@ class MijiaPlugin(NekoPluginBase):
                 except Exception as e:
                     self.logger.warning(f"删除数据文件失败 {item}: {e}")
         
+        # 关闭旧 client 再置 None，防止 HttpClient / CacheManager 资源泄漏
+        old_api = self.api
         self.api = None
+        if old_api is not None:
+            try:
+                await old_api.close()
+            except Exception as close_err:
+                self.logger.warning(f"关闭旧API客户端时出错: {close_err}")
         self.logger.info("已登出，凭据和数据已删除")
         return Ok({"success": True, "message": "✅ 已登出，所有本地数据已清除"})
 
@@ -356,15 +404,25 @@ class MijiaPlugin(NekoPluginBase):
             try:
                 with open(cache_path, 'r', encoding='utf-8') as f:
                     cached = json.load(f)
-                devices = cached.get('devices', [])
-                self.logger.info(f"从缓存读取设备列表: {len(devices)} 个设备")
-                # 构建友好消息（与网络请求分支保持一致）
-                lines = [f"📱 共有 {len(devices)} 个设备（缓存）:"]
-                for d in devices:
-                    status = "🟢" if d.get("is_online") else "🔴"
-                    lines.append(f"  {status} {d.get('name')} (型号: {d.get('model')})")
-                message = "\n".join(lines)
-                return Ok({"success": True, "message": message, "devices": devices, "from_cache": True, "count": len(devices)})
+                # 跨用户/家庭校验，防止缓存泄漏
+                cache_home_id = cached.get('home_id')
+                cache_user_id = cached.get('user_id')
+                current_user_id = self.api.credential.user_id if self.api and self.api.credential else None
+                if cache_home_id != home_id or (current_user_id and cache_user_id != current_user_id):
+                    self.logger.warning(
+                        f"缓存归属不匹配(user_id: {cache_user_id}→{current_user_id}, "
+                        f"home_id: {cache_home_id}→{home_id})，跳过缓存"
+                    )
+                else:
+                    devices = cached.get('devices', [])
+                    self.logger.info(f"从缓存读取设备列表: {len(devices)} 个设备")
+                    # 构建友好消息（与网络请求分支保持一致）
+                    lines = [f"📱 共有 {len(devices)} 个设备（缓存）:"]
+                    for d in devices:
+                        status = "🟢" if d.get("is_online") else "🔴"
+                        lines.append(f"  {status} {d.get('name')} (型号: {d.get('model')})")
+                    message = "\n".join(lines)
+                    return Ok({"success": True, "message": message, "devices": devices, "from_cache": True, "count": len(devices)})
             except Exception as e:
                 self.logger.warning(f"读取缓存失败: {e}")
         
@@ -427,6 +485,8 @@ class MijiaPlugin(NekoPluginBase):
                             
                             device_info["properties"] = properties
                             device_info["actions"] = actions
+                    except TokenExpiredError:
+                        raise  # 让外层统一返回"凭据已过期"，不能静默写半残缓存
                     except Exception as e:
                         self.logger.debug(f"获取设备 {d.name}({d.model}) 规格失败: {e}")
                 
@@ -434,8 +494,9 @@ class MijiaPlugin(NekoPluginBase):
             
             # 保存到缓存
             try:
+                user_id = self.api.credential.user_id if self.api and self.api.credential else None
                 with open(cache_path, 'w', encoding='utf-8') as f:
-                    json.dump({"devices": result, "home_id": home_id}, f, ensure_ascii=False, indent=2)
+                    json.dump({"devices": result, "home_id": home_id, "user_id": user_id}, f, ensure_ascii=False, indent=2)
                 self.logger.info(f"设备列表已缓存: {len(result)} 个设备")
             except Exception as e:
                 self.logger.warning(f"保存缓存失败: {e}")
@@ -475,17 +536,23 @@ class MijiaPlugin(NekoPluginBase):
             try:
                 with open(cache_path, 'r', encoding='utf-8') as f:
                     cached = json.load(f)
-                devices = cached.get('devices', [])
-                self.logger.info(f"AI 从缓存读取设备列表: {len(devices)} 个设备")
-                
-                # 构建友好消息
-                lines = [f"📱 共有 {len(devices)} 个设备:"]
-                for d in devices:
-                    status = "🟢" if d.get("is_online") else "🔴"
-                    lines.append(f"  {status} {d.get('name')} (型号: {d.get('model')})")
-                message = "\n".join(lines)
-                
-                return Ok({"success": True, "message": message, "devices": devices, "from_cache": True, "count": len(devices)})
+                # 跨用户校验，防止缓存泄漏
+                cache_user_id = cached.get('user_id')
+                current_user_id = self.api.credential.user_id if self.api and self.api.credential else None
+                if current_user_id and cache_user_id != current_user_id:
+                    self.logger.warning(
+                        f"缓存归属不匹配(user_id: {cache_user_id}→{current_user_id})，跳过缓存"
+                    )
+                else:
+                    devices = cached.get('devices', [])
+                    self.logger.info(f"AI 从缓存读取设备列表: {len(devices)} 个设备")
+                    # 构建友好消息
+                    lines = [f"📱 共有 {len(devices)} 个设备:"]
+                    for d in devices:
+                        status = "🟢" if d.get("is_online") else "🔴"
+                        lines.append(f"  {status} {d.get('name')} (型号: {d.get('model')})")
+                    message = "\n".join(lines)
+                    return Ok({"success": True, "message": message, "devices": devices, "from_cache": True, "count": len(devices)})
             except Exception as e:
                 self.logger.warning(f"读取缓存失败: {e}")
         
@@ -633,7 +700,7 @@ class MijiaPlugin(NekoPluginBase):
         for p in props:
             pname = p.get("name", "").lower()
             if any(k in pname for k in ["开关", "电源", "power", "switch"]):
-                if p.get("access") in ["write", "read_write"]:
+                if p.get("access") in ["write", "read_write", "notify_read_write"]:
                     switch = p
                     self.logger.info(f"找到开关属性: {p}")
                     break
@@ -641,7 +708,7 @@ class MijiaPlugin(NekoPluginBase):
         if not switch:
             # 找第一个可写的bool
             for p in props:
-                if p.get("access") in ["write", "read_write"] and p.get("type") == "bool":
+                if p.get("access") in ["write", "read_write", "notify_read_write"] and p.get("type") == "bool":
                     switch = p
                     self.logger.info(f"找到bool属性: {p}")
                     break
@@ -665,6 +732,8 @@ class MijiaPlugin(NekoPluginBase):
             else:
                 message = f"❌ {action}'{name}'失败"
                 return Ok({"success": False, "message": message})
+        except TokenExpiredError:
+            return Err(SdkError("凭据已过期，请重新登录"))
         except Exception as e:
             self.logger.exception("控制失败")
             return Err(SdkError(f"控制失败: {e}"))
@@ -726,8 +795,10 @@ class MijiaPlugin(NekoPluginBase):
     async def call_device_action(self, device_id: str, siid: int, aiid: int, params: Optional[list] = None, **_):
         if not self.api:
             return Err(SdkError("未登录"))
+        # 无参 action 需要空列表，不能透传 None（下层协议期望 list 而非 null）
+        normalized_params: list = params if params is not None else []
         try:
-            result = await self.api.call_device_action(device_id, siid, aiid, params)
+            result = await self.api.call_device_action(device_id, siid, aiid, normalized_params)
             message = f"✅ 操作执行成功 (siid={siid}, aiid={aiid})"
             return Ok({"success": True, "message": message, "result": result})
         except TokenExpiredError:
@@ -832,6 +903,14 @@ class MijiaPlugin(NekoPluginBase):
         devices = result.value.get("devices", [])
         if not devices:
             return Err(SdkError(f"未找到'{name}'"))
+        
+        # 多设备匹配时返回歧义错误，避免查询到错误设备
+        if len(devices) > 1:
+            device_names = [d.get("name", "未知") for d in devices]
+            return Err(SdkError(
+                f"找到多个匹配 '{name}' 的设备: {', '.join(device_names)}。"
+                f"请使用更精确的设备名称。"
+            ))
         
         device = devices[0]
         did = device.get("did")
@@ -1092,6 +1171,8 @@ class MijiaPlugin(NekoPluginBase):
                 "states": states
             })
             
+        except TokenExpiredError:
+            return Err(SdkError("凭据已过期，请重新登录"))
         except Exception as e:
             self.logger.exception("查询设备状态失败")
             return Err(SdkError(f"查询设备状态失败: {e}"))

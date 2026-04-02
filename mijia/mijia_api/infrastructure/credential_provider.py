@@ -21,6 +21,15 @@ from ..domain.models import Credential
 logger = get_logger(__name__)
 
 
+def _mask_user_id(user_id: Optional[str]) -> str:
+    """脱敏用户ID，只显示首尾各1字符，中间用 * 替代"""
+    if not user_id:
+        return "(unknown)"
+    if len(user_id) <= 2:
+        return user_id[0] + "***" if user_id else "***"
+    return f"{user_id[0]}***{user_id[-1]}"
+
+
 class CredentialProvider:
     """凭据提供者
 
@@ -87,7 +96,7 @@ class CredentialProvider:
                 expires_at=self._calculate_expires_at({}),
             )
 
-            logger.info(f"登录成功，用户ID: {credential.user_id}")
+            logger.info(f"登录成功，用户ID: {_mask_user_id(credential.user_id)}")
             return credential
 
         except LoginFailedError:
@@ -108,7 +117,7 @@ class CredentialProvider:
         Raises:
             TokenExpiredError: 凭据刷新失败
         """
-        logger.info(f"刷新凭据，用户ID: {credential.user_id}")
+        logger.info(f"刷新凭据，用户ID: {_mask_user_id(credential.user_id)}")
 
         # 检查是否有passToken
         if not credential.pass_token:
@@ -132,12 +141,19 @@ class CredentialProvider:
                 expires_at=self._calculate_expires_at(new_token_data),
             )
 
-            logger.info(f"凭据刷新成功，用户ID: {credential.user_id}")
+            logger.info(f"凭据刷新成功，用户ID: {_mask_user_id(credential.user_id)}")
             return new_credential
 
+        except TokenExpiredError:
+            raise  # 已经是最具体的异常，直接透传
         except Exception as e:
             logger.error(f"凭据刷新失败: {e}")
-            raise TokenExpiredError(f"凭据刷新失败: {e}") from e
+            # 仅当确定是鉴权/Token 失效时才抛 TokenExpiredError
+            # 网络超时、解析错误等应透传原异常
+            error_str = str(e).lower()
+            if any(kw in error_str for kw in ["401", "403", "token", "expired", "unauthorized", "invalid"]):
+                raise TokenExpiredError(f"凭据刷新失败: {e}") from e
+            raise  # 非鉴权错误直接透传
 
     def revoke(self, credential: Credential) -> bool:
         """撤销凭据
@@ -148,7 +164,7 @@ class CredentialProvider:
         Returns:
             bool: 撤销是否成功
         """
-        logger.info(f"撤销凭据，用户ID: {credential.user_id}")
+        logger.info(f"撤销凭据，用户ID: {_mask_user_id(credential.user_id)}")
 
         try:
             # 调用API撤销token
@@ -160,7 +176,7 @@ class CredentialProvider:
             )
 
             if response.status_code == 200:
-                logger.info(f"凭据撤销成功，用户ID: {credential.user_id}")
+                logger.info(f"凭据撤销成功，用户ID: {_mask_user_id(credential.user_id)}")
                 return True
             else:
                 logger.warning(f"凭据撤销失败，状态码: {response.status_code}")
@@ -712,39 +728,44 @@ class CredentialProvider:
     async def poll_login_result_async(self, login_url: str, timeout: int = 120) -> Optional[Credential]:
         """
         异步轮询扫码结果，返回凭据或 None
+
+        注意：复用 self._client（同步 httpx.Client）的 cookie jar，
+        以保持与 get_qrcode_async() 同一会话状态。
         """
         try:
-            # 使用异步 HTTP 客户端进行长轮询
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                # 长轮询请求
-                response = await client.get(login_url)
-                response.raise_for_status()
-                data = response.text.replace("&&&START&&&", "")
-                import json
-                result = json.loads(data)
-                if result.get("code") != 0:
-                    raise LoginFailedError(f"扫码失败: {result.get('desc')}")
+            # 长轮询请求（复用 self._client 的 cookie jar）
+            response = await asyncio.to_thread(
+                self._client.get, login_url, timeout=timeout
+            )
+            response.raise_for_status()
+            data = response.text.replace("&&&START&&&", "")
+            import json
+            result = json.loads(data)
+            if result.get("code") != 0:
+                raise LoginFailedError(f"扫码失败: {result.get('desc')}")
 
-                # 提取关键信息
-                callback_url = result["location"]
-                # 访问 callback 获取 cookies
-                callback_resp = await client.get(callback_url)
-                service_token = callback_resp.cookies.get("serviceToken")
-                if not service_token:
-                    raise LoginFailedError("未能获取 serviceToken")
+            # 提取关键信息
+            callback_url = result["location"]
+            # 访问 callback 获取 cookies（复用同一 session）
+            callback_resp = await asyncio.to_thread(
+                self._client.get, callback_url, timeout=timeout
+            )
+            service_token = callback_resp.cookies.get("serviceToken")
+            if not service_token:
+                raise LoginFailedError("未能获取 serviceToken")
 
-                # 构建凭据（部分字段需从 result 中获取）
-                credential = Credential(
-                    user_id=str(result["userId"]),
-                    service_token=service_token,
-                    ssecurity=result["ssecurity"],
-                    pass_token=result.get("passToken", ""),
-                    c_user_id=str(result.get("cUserId", result["userId"])),
-                    device_id=self._generate_device_id(),
-                    user_agent=self._generate_user_agent(),
-                    expires_at=self._calculate_expires_at({}),
-                )
-                return credential
+            # 构建凭据（部分字段需从 result 中获取）
+            credential = Credential(
+                user_id=str(result["userId"]),
+                service_token=service_token,
+                ssecurity=result["ssecurity"],
+                pass_token=result.get("passToken", ""),
+                c_user_id=str(result.get("cUserId", result["userId"])),
+                device_id=self._generate_device_id(),
+                user_agent=self._generate_user_agent(),
+                expires_at=self._calculate_expires_at({}),
+            )
+            return credential
         except httpx.TimeoutException:
             return None  # 超时未扫码
         except Exception as e:

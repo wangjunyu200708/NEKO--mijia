@@ -3,6 +3,7 @@
 提供便捷的工厂函数，自动创建和组装所有依赖组件。
 """
 
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -11,7 +12,7 @@ from .core.config import ConfigManager
 from .core.logging import get_logger
 from .domain.models import Credential
 from .infrastructure.cache_manager import CacheManager
-from .infrastructure.credential_provider import CredentialProvider
+from .infrastructure.credential_provider import CredentialProvider, _mask_user_id
 from .infrastructure.credential_store import FileCredentialStore, ICredentialStore
 from .infrastructure.crypto_service import CryptoService
 from .infrastructure.http_client import HttpClient
@@ -153,7 +154,7 @@ def create_api_client(
         cache_manager=cache_manager,
     )
 
-    logger.info(f"API客户端创建成功，用户ID: {credential.user_id}")
+    logger.info(f"API客户端创建成功，用户ID: {_mask_user_id(credential.user_id)}")
 
     return api
 
@@ -219,17 +220,24 @@ def create_async_api_client(
         cache_manager=cache_manager,
     )
 
-    logger.info(f"异步API客户端创建成功，用户ID: {credential.user_id}")
+    logger.info(f"异步API客户端创建成功，用户ID: {_mask_user_id(credential.user_id)}")
 
     return api
 
 
 def create_auth_service(
-    config_path: Optional[Path] = None, credential_store: Optional[ICredentialStore] = None
+    config_path: Optional[Path] = None, credential_store: Optional[ICredentialStore] = None,
+    credential_path: Optional[Path] = None,
 ) -> AuthService:
     """创建认证服务
 
     用于获取、刷新和管理用户凭据。
+
+    Note:
+        默认凭据路径为 ``.mijia/credential.json``（相对于项目根目录），
+        与插件入口 ``self.data_path("credential.json")`` 的默认路径不同。
+        如需统一，可通过 ``MIJIA_CREDENTIAL_PATH`` 环境变量或
+        ``credential_path`` 参数显式指定同一路径。
 
     Args:
         config_path: 配置文件路径（可选）
@@ -258,20 +266,24 @@ def create_auth_service(
 
     # 创建凭据存储
     if credential_store is None:
-        # 从配置读取凭据路径
-        credential_path_str = config.get("CREDENTIAL_PATH", ".mijia/credential.json")
-        credential_path = Path(credential_path_str)
-        
+        # 凭据路径优先级：参数 > 环境变量 > 配置 > 默认值
+        _effective_path = credential_path or (
+            os.environ.get("MIJIA_CREDENTIAL_PATH")
+            or config.get("CREDENTIAL_PATH")
+            or ".mijia/credential.json"
+        )
+        _cred_path = Path(_effective_path) if isinstance(_effective_path, (str, Path)) else Path(str(_effective_path))
+
         # 如果是相对路径，相对于项目根目录
-        if not credential_path.is_absolute() and not str(credential_path).startswith("~"):
+        if not _cred_path.is_absolute() and not str(_cred_path).startswith("~"):
             # 查找项目根目录
             project_root = _find_project_root()
-            credential_path = project_root / credential_path
+            _cred_path = project_root / _cred_path
         # 如果是用户目录路径，展开 ~
-        elif str(credential_path).startswith("~"):
-            credential_path = credential_path.expanduser()
-        
-        credential_store = FileCredentialStore(default_path=credential_path)
+        elif str(_cred_path).startswith("~"):
+            _cred_path = _cred_path.expanduser()
+
+        credential_store = FileCredentialStore(default_path=_cred_path)
 
     # 创建认证服务
     auth_service = AuthService(provider, credential_store)
@@ -320,7 +332,10 @@ def create_multi_user_clients(
         # 为每个用户创建独立的缓存目录（如果不使用Redis）
         cache_dir = None
         if redis_client is None:
-            cache_dir = Path.home() / ".mijia" / "cache" / user_id
+            # 用 user_id 的哈希作为目录名，防止路径穿越
+            import hashlib
+            safe_name = hashlib.sha256(user_id.encode()).hexdigest()[:16]
+            cache_dir = Path.home() / ".mijia" / "cache" / safe_name
 
         # 创建API客户端
         client = create_api_client(
@@ -331,7 +346,7 @@ def create_multi_user_clients(
         )
 
         clients[user_id] = client
-        logger.info(f"为用户 {user_id} 创建API客户端")
+        logger.info(f"为用户 {_mask_user_id(user_id)} 创建API客户端")
 
     logger.info(f"多用户API客户端创建完成，共 {len(clients)} 个用户")
 
@@ -370,9 +385,13 @@ def create_api_client_from_file(
     # 创建配置管理器
     config = create_config_manager(config_path)
     
-    # 如果未指定凭据路径，从配置读取
+    # 如果未指定凭据路径，从环境变量 > 配置 > 默认值 依次读取
     if credential_path is None:
-        credential_path_str = config.get("CREDENTIAL_PATH", ".mijia/credential.json")
+        credential_path_str = (
+            os.environ.get("MIJIA_CREDENTIAL_PATH")
+            or config.get("CREDENTIAL_PATH")
+            or ".mijia/credential.json"
+        )
         credential_path = Path(credential_path_str)
         
         # 如果是相对路径，相对于项目根目录

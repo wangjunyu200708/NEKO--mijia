@@ -8,6 +8,7 @@
 当 Redis 配置存在时，使用三层缓存；否则使用内存+文件两层缓存。
 """
 
+import fnmatch
 import hashlib
 import json
 from pathlib import Path
@@ -82,10 +83,10 @@ class CacheManager:
             return l1_value
 
         # L2: 查 Redis 缓存（如果配置）
-        l2_value = self._get_from_redis(full_key)
+        l2_value, l2_ttl = self._get_from_redis(full_key)
         if l2_value is not None:
             self._stats["l2_hits"] += 1
-            self._set_memory_cache(full_key, l2_value, ttl=300)
+            self._set_memory_cache(full_key, l2_value, ttl=l2_ttl)
             return l2_value
 
         # L3: 查文件缓存
@@ -113,23 +114,55 @@ class CacheManager:
             return self._state_cache[full_key]
         return None
 
-    def _get_from_redis(self, full_key: str) -> Optional[Any]:
-        """从Redis缓存获取值
+    def _get_from_redis(self, full_key: str) -> tuple[Optional[Any], int]:
+        """从Redis缓存获取值和原始TTL
 
         Args:
             full_key: 完整的缓存键（包含命名空间）
 
         Returns:
-            缓存值，不存在或失败返回None
+            (缓存值, 原始TTL秒数)；不存在或失败返回 (None, 300)
         """
         if not self._redis_client:
-            return None
+            return None, 300
 
         try:
-            return self._redis_client.get(full_key)
+            raw = self._redis_client.get(full_key)
+            if raw is None:
+                return None, 300
+            # 兼容旧格式（纯值）和新格式（带 TTL 元数据的 JSON）
+            if isinstance(raw, str):
+                try:
+                    data = json.loads(raw)
+                    if isinstance(data, dict) and "_value" in data:
+                        return data["_value"], data.get("_ttl", 300)
+                    # 旧格式：纯 JSON 值（dict/list 等），返回解析后的对象
+                    return data, 300
+                except Exception:
+                    pass
+                # 非 JSON 字符串，直接返回
+                return raw, 300
+            # redis-py 在 Python 3 返回 bytes；尝试按 bytes->str->JSON 解码
+            if isinstance(raw, bytes):
+                try:
+                    data = json.loads(raw.decode("utf-8"))
+                    if isinstance(data, dict) and "_value" in data:
+                        return data["_value"], data.get("_ttl", 300)
+                    return data, 300
+                except Exception:
+                    pass
+                # 非 JSON bytes，尝试解析为数字（兼容旧版直接存原始值如 "123" 或 b"123"）
+                try:
+                    decoded = raw.decode("utf-8").strip()
+                    if "." in decoded:
+                        return float(decoded), 300
+                    return int(decoded), 300
+                except Exception:
+                    pass
+            return raw, 300
         except Exception as e:
             logger.warning(f"Redis 读取失败: {e}", extra={"key": full_key})
-            return None
+            return None, 300
 
     def _get_from_file(self, full_key: str) -> Optional[Any]:
         """从文件缓存获取值
@@ -155,7 +188,8 @@ class CacheManager:
         # 回填到 L2（如果配置）
         if self._redis_client:
             try:
-                self._redis_client.set(full_key, value, ttl=3600)
+                redis_payload = {"_value": value, "_ttl": 3600}
+                self._redis_client.set(full_key, json.dumps(redis_payload), ex=3600)
             except Exception as e:
                 logger.warning(f"Redis 回填失败: {e}", extra={"key": full_key})
 
@@ -173,17 +207,18 @@ class CacheManager:
         # L1: 写入内存缓存
         self._set_memory_cache(full_key, value, ttl)
 
-        # L2: 写入 Redis（如果配置）
+        # L2: 写入 Redis（如果配置），将值与 TTL 元数据打包以便回填时还原
         if self._redis_client:
             try:
-                self._redis_client.set(full_key, value, ttl=ttl)
+                redis_payload = {"_value": value, "_ttl": ttl}
+                self._redis_client.set(full_key, json.dumps(redis_payload), ex=ttl)
             except Exception as e:
                 # Redis 写入失败不影响主流程
                 logger.warning(f"Redis 写入失败: {e}", extra={"key": full_key})
 
-        # L3: 长期缓存写入文件
+        # L3: 长期缓存写入文件（传递实际 ttl 和 namespace）
         if ttl > 300:
-            self._save_to_file(full_key, value)
+            self._save_to_file(full_key, value, ttl, namespace)
 
     def _set_memory_cache(self, full_key: str, value: Any, ttl: int) -> None:
         """写入内存缓存
@@ -225,6 +260,13 @@ class CacheManager:
             except Exception as e:
                 logger.warning(f"Redis 删除失败: {e}", extra={"key": full_key})
 
+        # L3: 删除文件缓存
+        try:
+            file_path = self._cache_dir / self._hash_key(full_key)
+            file_path.unlink(missing_ok=True)
+        except Exception as e:
+            logger.warning(f"文件缓存删除失败: {e}", extra={"key": full_key})
+
     def invalidate_pattern(self, pattern: str) -> None:
         """失效匹配模式的所有缓存
 
@@ -232,18 +274,31 @@ class CacheManager:
             pattern: 匹配模式，支持部分匹配
         """
         # L1: 清除内存缓存
-        keys_to_remove = [k for k in self._device_cache.keys() if pattern in k]
+        # 与 L2 (Redis glob 匹配) 保持一致：有 * 时用 fnmatch，否则用子串匹配
+        if "*" in pattern:
+            keys_to_remove = [k for k in self._device_cache.keys() if fnmatch.fnmatch(k, pattern)]
+        else:
+            keys_to_remove = [k for k in self._device_cache.keys() if pattern in k]
         for key in keys_to_remove:
             self._device_cache.pop(key, None)
 
-        keys_to_remove = [k for k in self._state_cache.keys() if pattern in k]
+        if "*" in pattern:
+            keys_to_remove = [k for k in self._state_cache.keys() if fnmatch.fnmatch(k, pattern)]
+        else:
+            keys_to_remove = [k for k in self._state_cache.keys() if pattern in k]
         for key in keys_to_remove:
             self._state_cache.pop(key, None)
 
         # L2: 清除 Redis 缓存（如果配置）
         if self._redis_client:
             try:
-                self._redis_client.delete_pattern(pattern)
+                # 优先尝试自定义适配器的 delete_pattern 方法，不存在则用标准 scan_iter
+                if hasattr(self._redis_client, 'delete_pattern'):
+                    self._redis_client.delete_pattern(pattern)
+                else:
+                    # 标准 redis-py：使用 scan_iter 遍历匹配键并删除
+                    for key in self._redis_client.scan_iter(match=pattern):
+                        self._redis_client.delete(key)
             except Exception as e:
                 logger.warning(f"Redis 批量删除失败: {e}", extra={"pattern": pattern})
 
@@ -254,8 +309,8 @@ class CacheManager:
             namespace: 命名空间，如果指定则只清空该命名空间的缓存，否则清空所有缓存
         """
         if namespace:
-            # 清空指定命名空间
-            self.invalidate_pattern(f"{namespace}:")
+            # 清空指定命名空间（L1/L2/L3 均使用 glob 前缀匹配，保证行为一致）
+            self.invalidate_pattern(f"{namespace}:*")
         else:
             # 清空所有缓存
             self._device_cache.clear()
@@ -276,6 +331,11 @@ class CacheManager:
                             break
                 except Exception as e:
                     logger.warning(f"Redis 清空失败: {e}")
+
+            # L3: 清空整个文件缓存目录
+            for f in self._cache_dir.iterdir():
+                if f.is_file():
+                    f.unlink(missing_ok=True)
 
             logger.info("所有缓存已清空")
 
@@ -322,7 +382,7 @@ class CacheManager:
         # 如果 Redis 可用，添加 Redis 统计
         if self._redis_client:
             try:
-                stats["redis_info"] = self._redis_client.get_info()
+                stats["redis_info"] = self._redis_client.info()
             except Exception:
                 stats["redis_info"] = "不可用"
 
@@ -341,29 +401,39 @@ class CacheManager:
         if file_path.exists():
             try:
                 with open(file_path, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    wrapper = json.load(f)
+                # 解包：支持旧格式（直接值）和新格式（_value 包装）
+                if isinstance(wrapper, dict) and "_value" in wrapper:
+                    import time
+                    if time.time() > wrapper.get("_expires_at", 0):
+                        file_path.unlink(missing_ok=True)
+                        return None
+                    return wrapper["_value"]
+                return wrapper
             except Exception as e:
                 logger.warning(f"文件缓存加载失败: {e}", extra={"key": key})
                 return None
         return None
 
-    def _save_to_file(self, key: str, value: Any, ttl: int = 3600) -> None:
+    def _save_to_file(self, key: str, value: Any, ttl: int = 3600, namespace: str = "default") -> None:
         """保存缓存到文件
 
         Args:
             key: 缓存键
             value: 缓存值
             ttl: 过期时间（秒）
+            namespace: 命名空间，用于 clear() 按 namespace 清除
         """
         import time
 
         file_path = self._cache_dir / self._hash_key(key)
         try:
-            # 包装值和过期时间
+            # 包装值、过期时间和命名空间
             wrapped = {
                 "_value": value,
                 "_expires_at": time.time() + ttl,
                 "_ttl": ttl,
+                "_namespace": namespace,
             }
             with open(file_path, "w", encoding="utf-8") as f:
                 json.dump(wrapped, f, ensure_ascii=False, indent=2)

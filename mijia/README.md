@@ -59,7 +59,7 @@
 | 关 | 关闭、关掉、关 |
 
 **示例**
-```
+```python
 smart_control(command="打开客厅插座")
 smart_control(command="关闭灯")
 ```
@@ -76,12 +76,12 @@ smart_control(command="关闭灯")
 按名称查询设备所有可读属性的当前值，是最常用的状态查询入口。
 
 **示例**
-```
+```python
 query_device_state(name="插座")
 ```
 
 **返回示例**
-```
+```text
 📱 设备 '插座' 当前状态：
 
   • 开关: ✅ 开启
@@ -98,7 +98,7 @@ query_device_state(name="插座")
 控制设备前，AI 通常需要先调用此入口获取 `did`、`siid`、`piid`。
 
 **示例**
-```
+```python
 find_device_by_name(name="插座")
 ```
 
@@ -215,13 +215,14 @@ execute_scene(scene_id="123456", home_id="abcdef")
 | 文件 | 内容 | 说明 |
 |------|------|------|
 | `credential.json` | 登录凭据 | 权限 600，仅当前用户可读 |
-| `devices_cache.json` | 设备列表及规格缓存 | 包含 did、properties、actions |
+| `devices_cache.json` | 设备列表及规格缓存 | 包含 did、properties、actions、user_id、home_id（归属校验用） |
 
 ### 缓存结构（devices_cache.json）
 
 ```json
 {
   "home_id": "xxx",
+  "user_id": "xxx",
   "devices": [
     {
       "did": "设备唯一ID",
@@ -325,5 +326,5 @@ Err(SdkError("设备离线"))
 ## 依赖
 
 - Python 3.11+
-- 内嵌 `mijia_api` 模块（无需额外安装）
+- 内嵌 `mijia_api` 模块（不用单独下载）
 - 外部依赖见项目根目录 `requirements.txt`

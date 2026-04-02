@@ -11,6 +11,22 @@ from .services.scene_service import SceneService
 from .services.statistics_service import StatisticsService
 
 
+class _NoOpCache:
+    """空操作缓存，当 cache_manager 未注入时使用，所有操作均为无操作。"""
+
+    def invalidate_pattern(self, pattern: str) -> None:
+        pass
+
+    def clear(self, namespace: Optional[str] = None) -> None:
+        pass
+
+    def get(self, key: str, namespace: str = "default") -> None:
+        return None
+
+    def set(self, key: str, value: Any, ttl: int = 300, namespace: str = "default") -> None:
+        pass
+
+
 class MijiaAPI:
     """米家API客户端（同步版本）
 
@@ -43,6 +59,11 @@ class MijiaAPI:
         self._statistics_service = statistics_service
         self._home_repository = home_repository
         self._cache_manager = cache_manager
+
+    @property
+    def _safe_cache(self) -> Any:
+        """返回缓存管理器，未注入时返回空操作缓存，防止 AttributeError。"""
+        return self._cache_manager if self._cache_manager is not None else _NoOpCache()
 
     def get_homes(self) -> List[Home]:
         """获取家庭列表
@@ -126,13 +147,18 @@ class MijiaAPI:
         )
 
         # 控制成功后刷新缓存
-        if result and refresh_cache and self._cache_manager:
+        if result and refresh_cache:
             # 获取设备信息以确定所属家庭
             device = self._device_service.get_device_by_id(device_id, self._credential)
             if device:
                 # 刷新该家庭的设备缓存
-                self._cache_manager.invalidate_pattern(
+                self._safe_cache.invalidate_pattern(
                     f"{self._credential.user_id}:devices:{device.home_id}"
+                )
+            else:
+                # 设备未查到时，退化为清理当前用户的全部设备缓存
+                self._safe_cache.invalidate_pattern(
+                    f"{self._credential.user_id}:devices:*"
                 )
 
         return result
@@ -176,13 +202,18 @@ class MijiaAPI:
         )
 
         # 操作成功后刷新缓存
-        if refresh_cache and self._cache_manager:
+        if refresh_cache:
             # 获取设备信息以确定所属家庭
             device = self._device_service.get_device_by_id(device_id, self._credential)
             if device:
                 # 刷新该家庭的设备缓存
-                self._cache_manager.invalidate_pattern(
+                self._safe_cache.invalidate_pattern(
                     f"{self._credential.user_id}:devices:{device.home_id}"
+                )
+            else:
+                # 设备未查到时，退化为清理当前用户的全部设备缓存
+                self._safe_cache.invalidate_pattern(
+                    f"{self._credential.user_id}:devices:*"
                 )
 
         return result
@@ -219,7 +250,7 @@ class MijiaAPI:
         results = self._device_service.batch_control_devices(requests, self._credential)
 
         # 批量控制成功后刷新缓存
-        if refresh_cache and self._cache_manager:
+        if refresh_cache:
             # 收集所有涉及的家庭ID
             home_ids = set()
             for request in requests:
@@ -230,10 +261,12 @@ class MijiaAPI:
                         home_ids.add(device.home_id)
 
             # 刷新所有涉及家庭的缓存
-            for home_id in home_ids:
-                self._cache_manager.invalidate_pattern(
-                    f"{self._credential.user_id}:devices:{home_id}"
-                )
+            if home_ids:
+                for home_id in home_ids:
+                    self._safe_cache.invalidate_pattern(f"{self._credential.user_id}:devices:{home_id}")
+            else:
+                # 所有设备均未查到时，退化为清理当前用户的全部设备缓存
+                self._safe_cache.invalidate_pattern(f"{self._credential.user_id}:devices:*")
 
         return results
 
@@ -266,7 +299,10 @@ class MijiaAPI:
             TokenExpiredError: 凭据已过期
             NetworkError: 网络错误
         """
-        return self._scene_service.execute_scene(scene_id, home_id, self._credential)
+        result = self._scene_service.execute_scene(scene_id, home_id, self._credential)
+        # 场景执行可能改变设备状态，失效缓存（键格式与 get_device_list 保持一致）
+        self._safe_cache.invalidate_pattern(f"{self._credential.user_id}:devices:{home_id}")
+        return result
 
     def get_device_statistics(self, home_id: str) -> Dict[str, Any]:
         """获取设备统计信息
@@ -365,16 +401,13 @@ class MijiaAPI:
             >>> # 刷新当前用户的所有缓存
             >>> api.refresh_cache()
         """
-        if not self._cache_manager:
-            return
-
         if home_id:
             # 刷新特定家庭的缓存
-            self._cache_manager.invalidate_pattern(f"{self._credential.user_id}:devices:{home_id}")
-            self._cache_manager.invalidate_pattern(f"{self._credential.user_id}:scenes:{home_id}")
+            self._safe_cache.invalidate_pattern(f"{self._credential.user_id}:devices:{home_id}")
+            self._safe_cache.invalidate_pattern(f"{self._credential.user_id}:scenes:{home_id}")
         else:
             # 刷新当前用户的所有缓存
-            self._cache_manager.clear(namespace=self._credential.user_id)
+            self._safe_cache.clear(namespace=self._credential.user_id)
 
     def clear_all_cache(self) -> None:
         """清空所有缓存
@@ -384,8 +417,7 @@ class MijiaAPI:
         Example:
             >>> api.clear_all_cache()
         """
-        if self._cache_manager:
-            self._cache_manager.clear()
+        self._safe_cache.clear()
 
     def close(self) -> None:
         """关闭API客户端，释放底层HTTP连接池资源。
@@ -451,6 +483,11 @@ class AsyncMijiaAPI:
         self._statistics_service = statistics_service
         self._home_repository = home_repository
         self._cache_manager = cache_manager
+
+    @property
+    def _safe_cache(self) -> Any:
+        """返回缓存管理器，未注入时返回空操作缓存，防止 AttributeError。"""
+        return self._cache_manager if self._cache_manager is not None else _NoOpCache()
 
     async def get_homes(self) -> List[Home]:
         """异步获取家庭列表
@@ -545,8 +582,13 @@ class AsyncMijiaAPI:
             )
             if device:
                 await asyncio.to_thread(
-                    self._cache_manager.invalidate_pattern,
+                    self._safe_cache.invalidate_pattern,
                     f"{self._credential.user_id}:devices:{device.home_id}",
+                )
+            else:
+                await asyncio.to_thread(
+                    self._safe_cache.invalidate_pattern,
+                    f"{self._credential.user_id}:devices:*",
                 )
 
         return result
@@ -598,8 +640,13 @@ class AsyncMijiaAPI:
             )
             if device:
                 await asyncio.to_thread(
-                    self._cache_manager.invalidate_pattern,
+                    self._safe_cache.invalidate_pattern,
                     f"{self._credential.user_id}:devices:{device.home_id}",
+                )
+            else:
+                await asyncio.to_thread(
+                    self._safe_cache.invalidate_pattern,
+                    f"{self._credential.user_id}:devices:*",
                 )
 
         return result
@@ -653,10 +700,16 @@ class AsyncMijiaAPI:
                         home_ids.add(device.home_id)
 
             # 刷新所有涉及家庭的缓存
-            for home_id in home_ids:
+            if home_ids:
+                for home_id in home_ids:
+                    await asyncio.to_thread(
+                        self._safe_cache.invalidate_pattern,
+                        f"{self._credential.user_id}:devices:{home_id}",
+                    )
+            else:
                 await asyncio.to_thread(
-                    self._cache_manager.invalidate_pattern,
-                    f"{self._credential.user_id}:devices:{home_id}",
+                    self._safe_cache.invalidate_pattern,
+                    f"{self._credential.user_id}:devices:*",
                 )
 
         return results
@@ -686,9 +739,14 @@ class AsyncMijiaAPI:
             是否成功
         """
         import asyncio
-        return await asyncio.to_thread(
+        result = await asyncio.to_thread(
             self._scene_service.execute_scene, scene_id, home_id, self._credential
         )
+        # 场景执行可能改变设备状态，失效缓存（键格式与 get_device_list 保持一致）
+        await asyncio.to_thread(
+            self._safe_cache.invalidate_pattern, f"{self._credential.user_id}:devices:{home_id}"
+        )
+        return result
 
     async def get_device_statistics(self, home_id: str) -> Dict[str, Any]:
         """异步获取设备统计信息
@@ -755,7 +813,7 @@ class AsyncMijiaAPI:
         """
         import asyncio
         return await asyncio.to_thread(
-            self._device_service._device_repo.batch_get_properties, requests, self._credential
+            self._device_service.batch_get_properties, requests, self._credential
         )
 
     def update_credential(self, credential: Credential) -> None:
@@ -797,17 +855,17 @@ class AsyncMijiaAPI:
         if home_id:
             # 刷新特定家庭的缓存
             await asyncio.to_thread(
-                self._cache_manager.invalidate_pattern,
+                self._safe_cache.invalidate_pattern,
                 f"{self._credential.user_id}:devices:{home_id}"
             )
             await asyncio.to_thread(
-                self._cache_manager.invalidate_pattern,
+                self._safe_cache.invalidate_pattern,
                 f"{self._credential.user_id}:scenes:{home_id}"
             )
         else:
             # 刷新当前用户的所有缓存
             await asyncio.to_thread(
-                self._cache_manager.clear,
+                self._safe_cache.clear,
                 namespace=self._credential.user_id
             )
 
@@ -819,9 +877,8 @@ class AsyncMijiaAPI:
         Example:
             >>> await api.clear_all_cache()
         """
-        if self._cache_manager:
-            import asyncio
-            await asyncio.to_thread(self._cache_manager.clear)
+        import asyncio
+        await asyncio.to_thread(self._safe_cache.clear)
 
     async def close(self) -> None:
         """关闭API客户端，释放底层HTTP连接池资源。
@@ -830,14 +887,17 @@ class AsyncMijiaAPI:
         """
         import asyncio
         try:
-            # 关闭底层 HttpClient（持有 httpx.Client 连接池）
-            http_client = getattr(self._device_service, '_http_client', None)
-            if http_client is None:
-                # 从 _device_repo 尝试获取
-                repo = getattr(self._device_service, '_device_repo', None)
-                if repo:
-                    http_client = getattr(repo, '_http_client', None) or getattr(repo, '_client', None)
-            if http_client and hasattr(http_client, 'close'):
-                await asyncio.to_thread(http_client.close)
+            # 关闭底层 HttpClient（持有 httpx.AsyncClient 连接池）
+            # HttpClient.close() 是同步方法，AsyncHttpClient.close() 是协程
+            repo = getattr(self._device_service, '_device_repo', None)
+            if repo:
+                http_client = getattr(repo, '_http', None)
+                if http_client and hasattr(http_client, 'close'):
+                    if asyncio.iscoroutinefunction(http_client.close):
+                        # AsyncHttpClient：协程方法，直接 await
+                        await http_client.close()
+                    else:
+                        # HttpClient：同步方法，用 to_thread 避免阻塞
+                        await asyncio.to_thread(http_client.close)
         except Exception:
             pass  # 关闭时忽略错误
